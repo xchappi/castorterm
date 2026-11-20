@@ -2,7 +2,7 @@
 name = "castorterm"
 version = "0.0.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "A GPU-accelerated terminal for agentic coding: workspaces, projects and agent sessions side by side."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/xchappi/castorterm"
@@ -11,7 +11,23 @@ keywords = ["terminal", "ai", "agents", "gpui"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
+alacritty_terminal = "0.26.0"
+anyhow = "1"
+futures = "0.3"
+gpui = "0.2.2"
+
+# Compile Metal shaders at runtime: avoids requiring the full Xcode Metal toolchain.
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Optimised build without LTO for CI preview binaries. Release-like builds
+# are required to distribute on Windows: debug builds of gpui load HLSL
+# shader sources at runtime from the build machine's cargo registry path.
+[profile.preview]
+inherits = "release"
+lto = false
+codegen-units = 16
