@@ -1,5 +1,9 @@
 //! castorterm: a native terminal for agentic coding.
 
+// Optimised Windows builds are GUI-subsystem apps: no extra console window
+// when launched from Explorer. Debug builds keep the console for logs.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod keys;
 mod palette;
 mod session;

@@ -23,5 +23,5 @@
 ## 5. Entry point and verification
 
 - [x] 5.1 `main.rs`: `--version`/`-V` flag, spawn session, open window, focus
-- [ ] 5.2 CI green on Windows, macOS and Linux (fmt, clippy -D warnings, tests)
-- [ ] 5.3 Manual check on Windows: prompt, colors, typing, Ctrl+C, resize, `exit` closes the window
+- [x] 5.2 CI green on Windows, macOS and Linux (fmt, clippy -D warnings, tests)
+- [x] 5.3 Manual check on Windows: prompt, colors, typing, Ctrl+C, resize, `exit` closes the window
