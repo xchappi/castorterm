@@ -4,19 +4,23 @@
 // when launched from Explorer. Debug builds keep the console for logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod config;
 mod keys;
 mod palette;
 mod session;
 mod shell;
+mod shortcuts;
+mod tabs;
+mod tree;
 mod view;
+mod workspace_view;
 
 use gpui::{
-    App, AppContext as _, Application, Bounds, Focusable as _, TitlebarOptions, WindowBounds,
-    WindowOptions, px, size,
+    App, AppContext as _, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px,
+    size,
 };
 
-use crate::session::{GridSize, Session};
-use crate::view::TerminalView;
+use crate::workspace_view::WorkspaceView;
 
 fn main() {
     if std::env::args()
@@ -27,8 +31,15 @@ fn main() {
         return;
     }
 
-    Application::new().run(|cx: &mut App| {
-        if let Err(err) = open_terminal_window(cx) {
+    let settings = config::load(&config::Env::from_process());
+    // A launch directory that cannot be read falls back to the home or root.
+    let launch_dir = std::env::current_dir()
+        .ok()
+        .or_else(|| config::Env::from_process().home)
+        .unwrap_or_else(|| std::path::PathBuf::from(std::path::MAIN_SEPARATOR_STR));
+
+    Application::new().run(move |cx: &mut App| {
+        if let Err(err) = open_workspace_window(settings, launch_dir, cx) {
             eprintln!("castorterm: {err:#}");
             // Nothing is on screen yet: exit right away with a failure code.
             std::process::exit(1);
@@ -36,19 +47,12 @@ fn main() {
     });
 }
 
-fn open_terminal_window(cx: &mut App) -> anyhow::Result<()> {
-    let (events_tx, events_rx) = futures::channel::mpsc::unbounded();
-    // Initial size is a guess; the first frame resizes to the real window.
-    let session = Session::spawn(
-        GridSize {
-            cols: 100,
-            rows: 30,
-        },
-        std::env::current_dir().ok(),
-        events_tx,
-    )?;
-
-    let bounds = Bounds::centered(None, size(px(1000.0), px(650.0)), cx);
+fn open_workspace_window(
+    settings: config::Settings,
+    launch_dir: std::path::PathBuf,
+    cx: &mut App,
+) -> anyhow::Result<()> {
+    let bounds = Bounds::centered(None, size(px(1200.0), px(720.0)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
@@ -57,13 +61,9 @@ fn open_terminal_window(cx: &mut App) -> anyhow::Result<()> {
         }),
         ..Default::default()
     };
-    let window = cx.open_window(options, |_window, cx| {
-        cx.new(|cx| TerminalView::new(session, events_rx, cx))
+    cx.open_window(options, |window, cx| {
+        cx.new(|cx| WorkspaceView::new(settings, launch_dir, window, cx))
     })?;
-
-    window.update(cx, |view, window, cx| {
-        window.focus(&view.focus_handle(cx));
-        cx.activate(true);
-    })?;
+    cx.activate(true);
     Ok(())
 }

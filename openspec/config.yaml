@@ -2,7 +2,7 @@ schema: spec-driven
 
 context: |
   castorterm is an open source, GPU-accelerated terminal for agentic coding, written in Rust.
-  UI framework: GPUI. Terminal state: alacritty_terminal. PTY: portable-pty (ConPTY on Windows).
+  UI framework: GPUI. Terminal state and PTY: alacritty_terminal (ConPTY on Windows).
   Designs and tasks must cover Windows (first-class), macOS and Linux.
   Write all artifacts in English (public open source project).
   Domain model: Workspace -> Project (repo or git worktree) -> Session (agent or shell, one PTY).

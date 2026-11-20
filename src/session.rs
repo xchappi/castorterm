@@ -156,6 +156,13 @@ impl Session {
         let _ = self.sender.send(Msg::Input(bytes.into()));
     }
 
+    /// Stops the PTY event loop, which closes the PTY and ends the shell
+    /// (ConPTY closes the pseudo console; on Unix the child gets SIGHUP).
+    pub fn shutdown(&self) {
+        // Fails only if the event loop already stopped.
+        let _ = self.sender.send(Msg::Shutdown);
+    }
+
     /// Whether the terminal is in application cursor keys mode (DECCKM).
     pub fn app_cursor(&self) -> bool {
         self.term.lock().mode().contains(TermMode::APP_CURSOR)

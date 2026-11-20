@@ -6,7 +6,8 @@ Run Claude Code, OpenCode, Codex or a plain shell side by side, grouped by
 **workspace → project → session**, and see at a glance which agent is
 working, which one is waiting for you and where each one is running.
 
-> Status: **pre-alpha**. Nothing usable yet — follow along or jump in.
+> Status: **pre-alpha**. Tabs, a workspace/project sidebar and agent
+> launchers work; agent status and cwd/branch display are next.
 
 ## Goals
 
@@ -24,6 +25,31 @@ working, which one is waiting for you and where each one is running.
 
 Every CI run on Windows publishes a `castorterm-windows-preview` artifact
 (optimised build) in the Actions tab.
+
+## Usage
+
+The sidebar lists your workspaces and projects. Each project has one
+launcher per agent (`+ Shell`, `+ Claude Code`...): it opens a new session
+in the project directory. Sessions show up under their project and in the
+tab bar.
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+Shift+T` | New shell in the current project |
+| `Ctrl+Shift+W` | Close the current session |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous session |
+
+castorterm exits when the last session closes.
+
+## Configuration
+
+Optional TOML file at `%APPDATA%\castorterm\config.toml` (Windows) or
+`~/.config/castorterm/config.toml` (macOS/Linux, honours `XDG_CONFIG_HOME`).
+`CASTORTERM_CONFIG` overrides the path. See
+[`config.example.toml`](config.example.toml) for every option.
+
+Without a config file castorterm opens a shell in the launch directory. If
+the file has errors, castorterm still starts and shows them in the sidebar.
 
 ## Building
 
