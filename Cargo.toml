@@ -23,3 +23,11 @@ gpui = { version = "0.2.2", features = ["runtime_shaders"] }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Optimised build without LTO for CI preview binaries. Release-like builds
+# are required to distribute on Windows: debug builds of gpui load HLSL
+# shader sources at runtime from the build machine's cargo registry path.
+[profile.preview]
+inherits = "release"
+lto = false
+codegen-units = 16
