@@ -23,4 +23,4 @@
 
 - [x] 4.1 README configuration section and `config.example.toml`
 - [ ] 4.2 CI green on Windows, macOS and Linux
-- [ ] 4.3 Manual check on Windows: sidebar, launchers (Shell, Claude Code, OpenCode), tabs, shortcuts, exit of last session
+- [ ] 4.3 Manual check on Windows: sidebar, launchers (Shell, Claude Code, OpenCode), tabs, shortcuts (held Ctrl+Shift+T/W do not repeat; no stray character in the new shell), closing a tab leaves no attached processes, exit of last session
