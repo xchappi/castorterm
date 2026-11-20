@@ -15,7 +15,7 @@ use crate::palette::DEFAULT_THEME;
 use crate::session::{GridSize, Session};
 use crate::shortcuts::{Shortcut, match_shortcut};
 use crate::tabs::{SessionId, Tabs};
-use crate::tree::{Launcher, ProjectTree, launchers};
+use crate::tree::{Launcher, ProjectTree, SHELL_LAUNCHER, launchers};
 use crate::view::{TerminalEvent, TerminalStyle, TerminalView};
 
 const SIDEBAR_WIDTH: f32 = 240.0;
@@ -70,7 +70,7 @@ impl WorkspaceView {
             config_messages: settings.messages,
             launch_error: None,
         };
-        this.launch(initial_project, 0, window, cx);
+        this.launch(initial_project, SHELL_LAUNCHER, window, cx);
         this
     }
 
@@ -191,10 +191,13 @@ impl WorkspaceView {
             return;
         };
         cx.stop_propagation();
+        if event.is_held && !shortcut.repeats() {
+            return;
+        }
         match shortcut {
             Shortcut::NewShell => {
                 let project = self.tabs.active().map(|t| t.project).unwrap_or(0);
-                self.launch(project, 0, window, cx);
+                self.launch(project, SHELL_LAUNCHER, window, cx);
             }
             Shortcut::CloseSession => {
                 if let Some(id) = self.tabs.active_id() {
@@ -233,7 +236,7 @@ impl WorkspaceView {
                 let node = &self.tree.projects[project];
                 let launchers = self.launchers.iter().enumerate().map(|(index, launcher)| {
                     div()
-                        .id(("launch", project * 1000 + index))
+                        .id((SharedString::from(format!("launch-{project}")), index))
                         .px_1()
                         .rounded_sm()
                         .border_1()

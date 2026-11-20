@@ -10,6 +10,14 @@ pub enum Shortcut {
     PrevSession,
 }
 
+impl Shortcut {
+    /// Whether a held key may repeat the shortcut. Opening or closing
+    /// sessions must not repeat: holding Ctrl+Shift+W would close them all.
+    pub fn repeats(self) -> bool {
+        matches!(self, Shortcut::NextSession | Shortcut::PrevSession)
+    }
+}
+
 /// Maps a GPUI key name plus modifiers to a shortcut. Chosen to avoid keys
 /// that shells and TUIs use: Ctrl+Shift+T/W and Ctrl+(Shift+)Tab.
 pub fn match_shortcut(key: &str, mods: Mods) -> Option<Shortcut> {
@@ -54,6 +62,14 @@ mod tests {
             match_shortcut("tab", CTRL_SHIFT),
             Some(Shortcut::PrevSession)
         );
+    }
+
+    #[test]
+    fn only_navigation_repeats() {
+        assert!(!Shortcut::NewShell.repeats());
+        assert!(!Shortcut::CloseSession.repeats());
+        assert!(Shortcut::NextSession.repeats());
+        assert!(Shortcut::PrevSession.repeats());
     }
 
     #[test]

@@ -65,7 +65,11 @@ in the project directory and writing `command` + `\r` to the PTY. Alternatives c
 - Shell-specific `-Command` / `-c` arguments: works but needs per-shell quoting rules.
 
 Typing the command is shell-agnostic and leaves a usable shell after the agent exits. The command
-comes from the user's own config file, so no new trust boundary is introduced.
+comes from the user's own config file, so no new trust boundary is introduced. Names and commands
+with control characters are rejected so a stray newline cannot run extra commands. The agent
+binary is resolved by the shell itself: PowerShell never runs commands from the current
+directory without `.\`, while POSIX shells only do so if the user's `PATH` contains `.`; that is
+the user's own shell policy and is documented rather than overridden.
 
 ### Shortcuts via capture phase
 
@@ -76,9 +80,13 @@ shells and TUIs commonly use: Ctrl+Shift+T/W and Ctrl+(Shift+)Tab.
 
 ### Closing sessions
 
-Closing a tab sends `Msg::Shutdown` to the PTY event loop, which drops the PTY: ConPTY closes the
-pseudo console (terminating attached clients) and on Unix the child receives SIGHUP. The later
-`Exited` event of a removed session is ignored. When the closed tab was active, the tab to its
+Closing a tab sends `Msg::Shutdown` to the PTY event loop, which drops the PTY: on Windows the
+pseudo console is closed, which ends the processes attached to it; on Unix the child receives
+SIGHUP. Dropping the last handle of a session sends the same message, so a session can never
+outlive its owner by accident. Processes that detach themselves from the console (e.g.
+`Start-Process`, daemons) survive, as in Windows Terminal; killing whole process trees with a Job
+Object is left for later. The later `Exited` event of a removed session is ignored. Key repeat
+never repeats opening or closing sessions, only switching between them. When the closed tab was active, the tab to its
 right becomes active (or the one to its left if it was the last). Closing the last tab quits.
 
 ### Focus
@@ -90,6 +98,9 @@ the `Window` (click listeners, `subscribe_in`, key capture), so focus is moved i
 
 - Typing the agent command before the shell has drawn its prompt relies on the PTY buffering
   typeahead; PowerShell/PSReadLine and bash do. Verified manually on Windows.
-- Inactive sessions keep receiving output and notifying the root view; cheap, since only the
-  active terminal is laid out and painted.
+- Inactive sessions keep receiving output and notifying their own `TerminalView`; cheap, since
+  only the active terminal is laid out and painted.
+- A command typed before the shell is ready can be lost by slow or interactive shell profiles.
+  Commands also end up in the shell history, so the example config warns against inline secrets.
+- Output printed right before a shell exits is not shown: the tab closes immediately.
 - Config errors are only visible in the sidebar; there is no notification system yet.

@@ -18,6 +18,8 @@ pub struct WorkspaceNode {
     pub name: String,
     /// Indices into [`ProjectTree::projects`].
     pub projects: Vec<usize>,
+    /// Created by castorterm for directories outside the config.
+    pub implicit: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -33,6 +35,7 @@ impl ProjectTree {
             let mut node = WorkspaceNode {
                 name: workspace.name.clone(),
                 projects: Vec::new(),
+                implicit: false,
             };
             for project in &workspace.projects {
                 node.projects.push(tree.projects.len());
@@ -61,15 +64,12 @@ impl ProjectTree {
             name,
             path: dir.to_path_buf(),
         });
-        match self
-            .workspaces
-            .iter_mut()
-            .find(|w| w.name == LOCAL_WORKSPACE)
-        {
+        match self.workspaces.iter_mut().find(|w| w.implicit) {
             Some(local) => local.projects.push(index),
             None => self.workspaces.push(WorkspaceNode {
                 name: LOCAL_WORKSPACE.into(),
                 projects: vec![index],
+                implicit: true,
             }),
         }
         index
@@ -91,6 +91,9 @@ pub struct Launcher {
     pub name: String,
     pub command: Option<String>,
 }
+
+/// Index of the built-in shell launcher in [`launchers`].
+pub const SHELL_LAUNCHER: usize = 0;
 
 /// The built-in "Shell" launcher followed by one per configured agent.
 pub fn launchers(agents: &[Agent]) -> Vec<Launcher> {
@@ -169,13 +172,26 @@ mod tests {
     }
 
     #[test]
+    fn user_workspace_named_local_is_not_reused() {
+        let dir = std::env::temp_dir();
+        let mut tree = ProjectTree::from_config(&[Workspace {
+            name: LOCAL_WORKSPACE.into(),
+            projects: vec![],
+        }]);
+        tree.project_for_dir(&dir);
+        assert_eq!(tree.workspaces.len(), 2);
+        assert!(tree.workspaces[0].projects.is_empty());
+        assert!(tree.workspaces[1].implicit);
+    }
+
+    #[test]
     fn launchers_start_with_shell() {
         let l = launchers(&[Agent {
             name: "OpenCode".into(),
             command: "opencode".into(),
         }]);
         assert_eq!(l.len(), 2);
-        assert_eq!(l[0].name, "Shell");
+        assert_eq!(l[SHELL_LAUNCHER].name, "Shell");
         assert_eq!(l[0].command, None);
         assert_eq!(l[1].command.as_deref(), Some("opencode"));
     }

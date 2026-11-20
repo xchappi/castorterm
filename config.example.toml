@@ -11,6 +11,8 @@ size = 14
 
 # Agent launchers. Each one opens your shell in the project directory and
 # types `command` into it, so the shell stays open when the agent exits.
+# The command lands in your shell history: do not put API keys in it, use
+# environment variables instead.
 [[agents]]
 name = "Claude Code"
 command = "claude"

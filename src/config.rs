@@ -183,10 +183,11 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
     for agent in raw.agents {
         let name = agent.name.trim();
         let command = agent.command.trim();
-        if name.is_empty() || command.is_empty() {
-            settings
-                .messages
-                .push("Agent skipped: name and command must not be empty".into());
+        if !valid_text(name) || !valid_text(command) {
+            settings.messages.push(format!(
+                "Agent '{}' skipped: name and command must be non-empty single lines",
+                name.escape_debug()
+            ));
             continue;
         }
         settings.agents.push(Agent {
@@ -196,11 +197,25 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
     }
 
     for workspace in raw.workspaces {
+        let workspace_name = workspace.name.trim();
+        if !valid_text(workspace_name) {
+            settings
+                .messages
+                .push("Workspace skipped: name must be a non-empty single line".into());
+            continue;
+        }
         let mut projects = Vec::new();
         for project in workspace.projects {
+            let name = project.name.trim();
+            if !valid_text(name) {
+                settings.messages.push(format!(
+                    "Project in '{workspace_name}' skipped: name must be a non-empty single line"
+                ));
+                continue;
+            }
             match expand_home(project.path.trim(), home) {
                 Some(path) if path.is_absolute() => projects.push(Project {
-                    name: project.name.trim().into(),
+                    name: name.into(),
                     path,
                 }),
                 _ => settings.messages.push(format!(
@@ -210,12 +225,18 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
             }
         }
         settings.workspaces.push(Workspace {
-            name: workspace.name.trim().into(),
+            name: workspace_name.into(),
             projects,
         });
     }
 
     Ok(settings)
+}
+
+/// Non-empty and free of control characters: commands are typed into the
+/// shell, so an embedded newline would run extra commands.
+fn valid_text(text: &str) -> bool {
+    !text.is_empty() && !text.chars().any(char::is_control)
 }
 
 /// Expands a leading `~` (alone or followed by a separator) to `home`.
@@ -381,6 +402,45 @@ mod tests {
         assert_eq!(s.font_size, None);
         assert!(s.agents.is_empty());
         assert_eq!(s.messages.len(), 2);
+    }
+
+    #[test]
+    fn font_size_bounds() {
+        for (size, ok) in [
+            ("6.0", true),
+            ("72.0", true),
+            ("5.9", false),
+            ("72.5", false),
+            ("nan", false),
+            ("inf", false),
+        ] {
+            let s = parse(&format!("[font]\nsize = {size}"), None).unwrap();
+            assert_eq!(s.font_size.is_some(), ok, "size {size}");
+            assert_eq!(s.messages.is_empty(), ok, "size {size}");
+        }
+    }
+
+    #[test]
+    fn control_characters_and_empty_names_are_rejected() {
+        let text = r#"
+            [[agents]]
+            name = "Evil"
+            command = "claude\nrm -rf ~"
+
+            [[workspaces]]
+            name = ""
+
+            [[workspaces]]
+            name = "W"
+            [[workspaces.projects]]
+            name = " "
+            path = "/x"
+        "#;
+        let s = parse(text, None).unwrap();
+        assert!(s.agents.is_empty());
+        assert_eq!(s.workspaces.len(), 1);
+        assert!(s.workspaces[0].projects.is_empty());
+        assert_eq!(s.messages.len(), 3);
     }
 
     #[test]
