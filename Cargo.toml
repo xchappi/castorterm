@@ -1,0 +1,17 @@
+[package]
+name = "castorterm"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+description = "A GPU-accelerated terminal for agentic coding: workspaces, projects and agent sessions side by side."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/xchappi/castorterm"
+readme = "README.md"
+keywords = ["terminal", "ai", "agents", "gpui"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
