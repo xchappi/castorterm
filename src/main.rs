@@ -26,7 +26,8 @@ fn main() {
     Application::new().run(|cx: &mut App| {
         if let Err(err) = open_terminal_window(cx) {
             eprintln!("castorterm: {err:#}");
-            cx.quit();
+            // Nothing is on screen yet: exit right away with a failure code.
+            std::process::exit(1);
         }
     });
 }

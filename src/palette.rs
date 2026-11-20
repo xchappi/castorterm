@@ -109,6 +109,17 @@ impl Theme {
         }
     }
 
+    /// Theme color for an alacritty color index: 0-255 are the xterm
+    /// palette, 256+ the named special colors (foreground, background...).
+    pub fn by_index(&self, index: usize) -> Rgb8 {
+        match u8::try_from(index) {
+            Ok(i) => self.indexed(i),
+            Err(_) if index == NamedColor::Background as usize => self.background,
+            Err(_) if index == NamedColor::Cursor as usize => self.cursor,
+            Err(_) => self.foreground,
+        }
+    }
+
     /// Resolves a cell color, honouring OSC 4/10/11 overrides in `colors`.
     pub fn resolve(&self, color: Color, colors: &Colors) -> Rgb8 {
         match color {
@@ -164,6 +175,16 @@ mod tests {
             t.resolve(Color::Named(NamedColor::Foreground), &colors),
             Rgb8 { r: 9, g: 9, b: 9 }
         );
+    }
+
+    #[test]
+    fn by_index_covers_palette_and_special_colors() {
+        let t = &DEFAULT_THEME;
+        assert_eq!(t.by_index(1), t.ansi[1]);
+        assert_eq!(t.by_index(196), Rgb8::hex(0xff0000));
+        assert_eq!(t.by_index(NamedColor::Foreground as usize), t.foreground);
+        assert_eq!(t.by_index(NamedColor::Background as usize), t.background);
+        assert_eq!(t.by_index(NamedColor::Cursor as usize), t.cursor);
     }
 
     #[test]

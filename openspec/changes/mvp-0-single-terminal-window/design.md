@@ -41,8 +41,9 @@ commits on Windows. Ctrl+Alt is left to the input handler because it is AltGr on
 The `EventLoop` runs on its own thread. A `Listener` (EventListener) forwards `Wakeup`,
 `PtyWrite` and `Exit/ChildExit` over an unbounded futures channel to a task spawned with
 `cx.spawn`, which coalesces bursts, writes `PtyWrite` replies back to the PTY, calls
-`cx.notify()` and quits the app on exit. `EventLoopSender` is not `Clone`, so it is owned by the
-view (`Arc`) and only used from the UI thread.
+`cx.notify()` and quits the app on exit. A watcher thread joins the PTY reader thread and also
+sends `Exit`, because the event loop can stop on I/O errors without reporting a child exit.
+`ColorRequest` (OSC 4/10/11 queries) is answered with the theme color.
 
 ### Resize
 Prepaint computes `cols = floor(width / cell_width)`, `rows = floor(height / line_height)`. If the
@@ -52,10 +53,18 @@ grid changed, it resizes the `Term` and sends `Msg::Resize` to the event loop.
 Windows: `pwsh.exe -NoLogo`, falling back to `powershell.exe -NoLogo` when spawning fails.
 Unix: `$SHELL`, falling back to `/bin/bash`. Working directory: the launch directory.
 
+Programs are resolved to an absolute path before spawning, searching only the absolute entries of
+`PATH`. ConPTY calls `CreateProcessW` without an application name, which would otherwise also
+search the working directory: launching castorterm inside an untrusted repository containing a
+`pwsh.exe` must not execute it. On Windows the resolved path is quoted because alacritty does not
+quote the program in the command line (`C:\Program Files\...`).
+
 ## Risks / Trade-offs
 
 - [GPUI API churn] -> pin `gpui = "0.2.2"`; isolate GPUI code in `view.rs`.
 - [Blind implementation, no local compiler] -> CI on three OSes is the gate; pure modules are unit-tested.
 - [Linux CI needs system libraries] -> install xkbcommon/wayland/x11/fontconfig/freetype dev packages in CI.
 - [Release builds on Windows need `fxc.exe`] -> out of scope; CI builds debug only. Revisit with release tooling.
+- [Linux build: `xattr` 0.2.3 (via gpui's http client) does not compile with libc >= 0.2.190] ->
+  `Cargo.lock` is committed with libc 0.2.189 / mio 1.2.4 until gpui updates the dependency.
 - [Font availability] -> Consolas (Windows), Menlo (macOS), DejaVu Sans Mono (Linux); GPUI falls back otherwise.

@@ -13,7 +13,7 @@ use gpui::{
     UTF16Selection, Window, canvas, div, fill, font, point, prelude::*, px, size,
 };
 
-use crate::keys::{Mods, encode_key};
+use crate::keys::{KeyMode, Mods, encode_key};
 use crate::palette::{DEFAULT_THEME, Rgb8};
 use crate::session::{GridSize, Session, SessionEvent};
 
@@ -78,7 +78,11 @@ impl TerminalView {
             alt: keystroke.modifiers.alt,
             shift: keystroke.modifiers.shift,
         };
-        if let Some(bytes) = encode_key(&keystroke.key, mods, self.session.app_cursor()) {
+        let mode = KeyMode {
+            app_cursor: self.session.app_cursor(),
+            alt_sends_escape: cfg!(not(target_os = "macos")),
+        };
+        if let Some(bytes) = encode_key(&keystroke.key, mods, mode) {
             self.session.write(bytes);
             // Stop here so the key does not also arrive as text input.
             cx.stop_propagation();
