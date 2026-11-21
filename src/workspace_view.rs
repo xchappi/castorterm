@@ -34,7 +34,7 @@ use crate::tabs::{SessionId, Tabs};
 use crate::theme::{
     ACCENT, BORDER, ERROR, HUD_BG, LOGO_FONT, LOGO_TEXT_SIZE, MUTED, PANEL_BG, SMALL_TEXT_SIZE,
     TEXT, TEXT_SIZE, TITLE, TITLE_TEXT_SIZE, UI_FONT, WORKSPACE, file_color, label, launcher_color,
-    priority_color, with_alpha,
+    priority_color, ui, with_alpha,
 };
 use crate::tree::{Launcher, ProjectTree, SHELL_LAUNCHER, launchers};
 use crate::view::{InputGate, TerminalEvent, TerminalStyle, TerminalView};
@@ -160,6 +160,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> Self {
         let restore_sessions = settings.restore_sessions;
+        crate::theme::set_zoom(settings.zoom);
         // Agents report their status through files; poll them every second.
         let status_timer = cx.spawn(async move |this, cx| {
             loop {
@@ -480,6 +481,46 @@ impl WorkspaceView {
             });
         })
         .detach();
+    }
+
+    /// Changes the zoom by `step`, or back to 100% with `None`; repaints
+    /// everything (terminals recompute their grid) and saves it.
+    fn change_zoom(&mut self, step: Option<f32>, cx: &mut Context<Self>) {
+        let current = crate::theme::zoom();
+        let next = crate::theme::set_zoom(step.map_or(1.0, |s| current + s));
+        if next == current {
+            return;
+        }
+        for tab in self.tabs.iter() {
+            tab.handle.view.update(cx, |_, cx| cx.notify());
+        }
+        self.persist_quietly(&crate::config_edit::Edit::SetZoom(next));
+        cx.notify();
+    }
+
+    /// Folds or unfolds `workspace` in the sidebar and saves it.
+    fn toggle_collapsed(&mut self, workspace: usize, cx: &mut Context<Self>) {
+        let Some(node) = self.tree.workspaces.get_mut(workspace) else {
+            return;
+        };
+        node.collapsed = !node.collapsed;
+        if !node.implicit {
+            let edit = crate::config_edit::Edit::SetCollapsed {
+                workspace: node.name.clone(),
+                collapsed: node.collapsed,
+            };
+            self.persist_quietly(&edit);
+        }
+        cx.notify();
+    }
+
+    /// Saves a UI preference; a failure shows in the sidebar like other saves.
+    fn persist_quietly(&mut self, edit: &crate::config_edit::Edit) {
+        if let Some(path) = &self.config_path
+            && let Err(err) = crate::config_edit::save(path, edit, self.home.as_deref())
+        {
+            self.notice = Some(format!("Not saved to the config file: {err}"));
+        }
     }
 
     /// Activates the next session (after the active one, wrapping) whose
@@ -894,6 +935,9 @@ impl WorkspaceView {
             }
             Shortcut::Palette => self.open_palette(window, cx),
             Shortcut::NextWaiting => self.next_waiting(window, cx),
+            Shortcut::ZoomIn => self.change_zoom(Some(crate::theme::ZOOM_STEP), cx),
+            Shortcut::ZoomOut => self.change_zoom(Some(-crate::theme::ZOOM_STEP), cx),
+            Shortcut::ZoomReset => self.change_zoom(None, cx),
         }
     }
 
@@ -921,7 +965,7 @@ impl WorkspaceView {
                     .child(
                         div()
                             .font_family(LOGO_FONT)
-                            .text_size(px(LOGO_TEXT_SIZE))
+                            .text_size(ui(LOGO_TEXT_SIZE))
                             .text_color(rgb(TITLE))
                             .child("CASTORTERM"),
                     ),
@@ -972,7 +1016,7 @@ impl WorkspaceView {
                     .border_1()
                     .border_color(rgba(with_alpha(ERROR, 0x99)))
                     .bg(rgba(with_alpha(ERROR, 0x14)))
-                    .text_size(px(SMALL_TEXT_SIZE))
+                    .text_size(ui(SMALL_TEXT_SIZE))
                     .text_color(rgb(ERROR))
                     .child(SharedString::from(msg.clone()))
             });
@@ -1088,7 +1132,7 @@ impl WorkspaceView {
                                         .text_ellipsis()
                                         .whitespace_nowrap()
                                         .font_weight(FontWeight::NORMAL)
-                                        .text_size(px(SMALL_TEXT_SIZE))
+                                        .text_size(ui(SMALL_TEXT_SIZE))
                                         .text_color(rgba(with_alpha(WORKSPACE, 0xaa)))
                                         .children(
                                             self.branches
@@ -1133,6 +1177,16 @@ impl WorkspaceView {
                 });
                 let group = SharedString::from(format!("workspace-row-{w_index}"));
                 let removable = !self.has_sessions(&workspace.projects);
+                let collapsed = workspace.collapsed;
+                let open_sessions = self
+                    .tabs
+                    .iter()
+                    .filter(|t| workspace.projects.contains(&t.project))
+                    .count();
+                let waiting_inside = self.tabs.iter().any(|t| {
+                    workspace.projects.contains(&t.project)
+                        && self.statuses.get(&t.id) == Some(&AgentStatus::Waiting)
+                });
                 let header = if self.renaming(w_index) {
                     self.render_editor()
                         .unwrap_or_else(|| div().into_any_element())
@@ -1145,18 +1199,54 @@ impl WorkspaceView {
                         .gap_2()
                         .px_2()
                         .py(px(2.0))
-                        .text_size(px(SMALL_TEXT_SIZE))
+                        .text_size(ui(SMALL_TEXT_SIZE))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(WORKSPACE))
                         .child(dot(WORKSPACE, 6.0, true))
                         .child(
+                            // Click the name to fold or unfold the workspace.
                             div()
+                                .id(("workspace-name", w_index))
                                 .flex_1()
                                 .min_w(px(0.0))
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .child(SharedString::from(label(&workspace.name))),
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(rgb(TEXT)))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(rgb(MUTED))
+                                        .child(chevron(!collapsed)),
+                                )
+                                .child(
+                                    div()
+                                        .min_w(px(0.0))
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(SharedString::from(label(&workspace.name))),
+                                )
+                                // Folded: how many sessions run inside, and
+                                // whether an agent there waits for the user.
+                                .when(collapsed && open_sessions > 0, |d| {
+                                    d.child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(rgb(MUTED))
+                                            .font_weight(FontWeight::NORMAL)
+                                            .child(SharedString::from(format!(
+                                                "· {open_sessions}"
+                                            ))),
+                                    )
+                                })
+                                .when(collapsed && waiting_inside, |d| {
+                                    d.child(status_badge(AgentStatus::Waiting))
+                                })
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.toggle_collapsed(w_index, cx)
+                                })),
                         )
                         .child(
                             Self::row_action(("add-folder", w_index), group.clone(), "+", ACCENT)
@@ -1211,8 +1301,10 @@ impl WorkspaceView {
                         this.add_folders(w_index, paths.paths().to_vec(), cx)
                     }))
                     .child(header)
-                    .when(empty, |d| d.child(self.render_empty_workspace(w_index, cx)))
-                    .children(projects)
+                    .when(empty && !collapsed, |d| {
+                        d.child(self.render_empty_workspace(w_index, cx))
+                    })
+                    .when(!collapsed, |d| d.children(projects))
             });
         let new_workspace = self
             .editor
@@ -1223,7 +1315,7 @@ impl WorkspaceView {
         div()
             .id("sidebar")
             .flex_none()
-            .w(px(SIDEBAR_WIDTH))
+            .w(ui(SIDEBAR_WIDTH))
             .h_full()
             .flex()
             .flex_col()
@@ -1233,7 +1325,7 @@ impl WorkspaceView {
             .bg(rgb(PANEL_BG))
             .border_r_1()
             .border_color(rgb(BORDER))
-            .text_size(px(TEXT_SIZE))
+            .text_size(ui(TEXT_SIZE))
             .text_color(rgb(MUTED))
             .child(
                 div()
@@ -1241,7 +1333,7 @@ impl WorkspaceView {
                     .items_center()
                     .justify_between()
                     .px_2()
-                    .text_size(px(SMALL_TEXT_SIZE))
+                    .text_size(ui(SMALL_TEXT_SIZE))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("QUEST LOG")
                     .child(
@@ -1309,7 +1401,7 @@ impl WorkspaceView {
             .justify_between()
             .px_2()
             .py_2()
-            .text_size(px(SMALL_TEXT_SIZE))
+            .text_size(ui(SMALL_TEXT_SIZE))
             .font_weight(FontWeight::SEMIBOLD)
             .child(
                 div()
@@ -1347,7 +1439,7 @@ impl WorkspaceView {
             div()
                 .px_3()
                 .pb_1()
-                .text_size(px(SMALL_TEXT_SIZE))
+                .text_size(ui(SMALL_TEXT_SIZE))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(WORKSPACE))
                 .child(SharedString::from(label(&w.name)))
@@ -1361,7 +1453,7 @@ impl WorkspaceView {
 
         div()
             .flex_none()
-            .w(px(EXPLORER_WIDTH))
+            .w(ui(EXPLORER_WIDTH))
             .h_full()
             .flex()
             .flex_col()
@@ -1468,7 +1560,7 @@ impl WorkspaceView {
             div()
                 .px_3()
                 .py_1()
-                .text_size(px(SMALL_TEXT_SIZE))
+                .text_size(ui(SMALL_TEXT_SIZE))
                 .text_color(rgb(color))
                 .child(SharedString::from(text))
                 .into_any_element()
@@ -1537,7 +1629,7 @@ impl WorkspaceView {
                     .px_3()
                     .pt_2()
                     .pb_1()
-                    .text_size(px(SMALL_TEXT_SIZE))
+                    .text_size(ui(SMALL_TEXT_SIZE))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(color))
                     .when(collapsible, |d| {
@@ -1606,7 +1698,7 @@ impl WorkspaceView {
                             .rounded_sm()
                             .border_1()
                             .border_color(rgba(with_alpha(color, 0x80)))
-                            .text_size(px(SMALL_TEXT_SIZE))
+                            .text_size(ui(SMALL_TEXT_SIZE))
                             .text_color(rgb(color))
                             .child(SharedString::from(p.clone()))
                     }))
@@ -1618,7 +1710,7 @@ impl WorkspaceView {
                                 div()
                                     .flex()
                                     .gap_2()
-                                    .text_size(px(SMALL_TEXT_SIZE))
+                                    .text_size(ui(SMALL_TEXT_SIZE))
                                     .text_color(rgb(MUTED))
                                     .child(SharedString::from(task.id.clone()))
                                     .children(self.task_project_label(task, workspace).map(
@@ -1719,7 +1811,7 @@ impl WorkspaceView {
             .gap_1()
             .px_2()
             .pb_2()
-            .text_size(px(SMALL_TEXT_SIZE))
+            .text_size(ui(SMALL_TEXT_SIZE))
             .text_color(rgb(MUTED))
             .child(SharedString::from(project_text))
             .children(prompt.filter(|_| has_buttons).map(|prompt| {
@@ -1844,7 +1936,7 @@ impl WorkspaceView {
             .pt_1()
             .overflow_x_scroll()
             .bg(rgb(PANEL_BG))
-            .text_size(px(TEXT_SIZE))
+            .text_size(ui(TEXT_SIZE))
             .children(tabs)
     }
 }
@@ -1922,7 +2014,7 @@ fn chip(text: String, color: u32) -> Div {
         .border_1()
         .border_color(rgba(with_alpha(color, 0x66)))
         .bg(rgba(with_alpha(color, 0x14)))
-        .text_size(px(SMALL_TEXT_SIZE))
+        .text_size(ui(SMALL_TEXT_SIZE))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(rgb(color))
         .child(SharedString::from(text))
@@ -1938,7 +2030,7 @@ fn launcher_button(id: impl Into<ElementId>, text: String, color: u32) -> Statef
         .border_1()
         .border_color(rgba(with_alpha(color, 0x80)))
         .bg(rgba(with_alpha(color, 0x14)))
-        .text_size(px(SMALL_TEXT_SIZE))
+        .text_size(ui(SMALL_TEXT_SIZE))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(rgb(color))
         .cursor_pointer()
@@ -1974,7 +2066,7 @@ fn status_badge(status: AgentStatus) -> Div {
         .flex_none()
         .px_1()
         .rounded_sm()
-        .text_size(px(SMALL_TEXT_SIZE))
+        .text_size(ui(SMALL_TEXT_SIZE))
         .text_color(rgb(color))
         .border_1()
         .border_color(rgba(with_alpha(color, 0x88)))
@@ -2042,7 +2134,7 @@ impl Render for WorkspaceView {
                 .gap_2()
                 .child(
                     div()
-                        .text_size(px(TITLE_TEXT_SIZE))
+                        .text_size(ui(TITLE_TEXT_SIZE))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(TITLE))
                         .child("Press + to start"),
@@ -2061,10 +2153,22 @@ impl Render for WorkspaceView {
             .flex_col()
             .bg(rgb(HUD_BG))
             .font_family(UI_FONT)
-            .text_size(px(TEXT_SIZE))
+            .text_size(ui(TEXT_SIZE))
             .text_color(rgb(TEXT))
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(Self::on_key_capture))
+            // Ctrl + wheel zooms, anywhere in the window.
+            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+                if !event.modifiers.control {
+                    return;
+                }
+                let dy = event.delta.pixel_delta(px(16.0)).y;
+                if dy > px(0.0) {
+                    this.change_zoom(Some(crate::theme::ZOOM_STEP), cx);
+                } else if dy < px(0.0) {
+                    this.change_zoom(Some(-crate::theme::ZOOM_STEP), cx);
+                }
+            }))
             .relative()
             .child(self.render_hud())
             .child(

@@ -216,6 +216,7 @@ mod tests {
         let tree = ProjectTree::from_config(&[Workspace {
             name: "W".into(),
             board: None,
+            collapsed: false,
             projects: vec![
                 Project {
                     name: "a".into(),

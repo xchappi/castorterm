@@ -60,6 +60,8 @@ struct RawBoard {
 struct RawUi {
     scanlines: Option<bool>,
     restore_sessions: Option<bool>,
+    /// Text size factor for the terminal and the interface.
+    zoom: Option<f32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -83,6 +85,9 @@ struct RawAgent {
 struct RawWorkspace {
     name: String,
     board: Option<RawBoard>,
+    /// Folded in the sidebar.
+    #[serde(default)]
+    collapsed: bool,
     #[serde(default)]
     projects: Vec<RawProject>,
 }
@@ -140,6 +145,8 @@ pub struct Workspace {
     pub name: String,
     pub board: Option<Board>,
     pub projects: Vec<Project>,
+    /// Folded in the sidebar.
+    pub collapsed: bool,
 }
 
 /// Validated configuration plus the problems found while loading it.
@@ -153,6 +160,8 @@ pub struct Settings {
     pub scanlines: bool,
     /// Reopen the sessions of the last run at startup (on by default).
     pub restore_sessions: bool,
+    /// Text size factor (`crate::theme::clamp_zoom`), 1.0 by default.
+    pub zoom: f32,
     /// Human readable warnings and errors for the sidebar.
     pub messages: Vec<String>,
     /// Where workspace changes made from the UI are saved.
@@ -170,6 +179,7 @@ impl Default for Settings {
             workspaces: Vec::new(),
             scanlines: true,
             restore_sessions: true,
+            zoom: 1.0,
             messages: Vec::new(),
             config_path: None,
             home: None,
@@ -266,6 +276,7 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
     let mut settings = Settings {
         scanlines: raw.ui.scanlines.unwrap_or(true),
         restore_sessions: raw.ui.restore_sessions.unwrap_or(true),
+        zoom: crate::theme::clamp_zoom(raw.ui.zoom.unwrap_or(1.0)),
         ..Settings::default()
     };
 
@@ -416,6 +427,7 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
             name: workspace_name.into(),
             board,
             projects,
+            collapsed: workspace.collapsed,
         });
     }
 

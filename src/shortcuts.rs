@@ -15,6 +15,9 @@ pub enum Shortcut {
     Palette,
     /// Go to the next session whose agent waits for the user.
     NextWaiting,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
 }
 
 impl Shortcut {
@@ -32,6 +35,13 @@ pub fn match_shortcut(key: &str, mods: Mods) -> Option<Shortcut> {
         return None;
     }
     let key = key.to_ascii_lowercase();
+    // Zoom like Windows Terminal and browsers: Ctrl+= (or +), Ctrl+-, Ctrl+0.
+    match key.as_str() {
+        "=" | "+" => return Some(Shortcut::ZoomIn),
+        "-" => return Some(Shortcut::ZoomOut),
+        "0" if !mods.shift => return Some(Shortcut::ZoomReset),
+        _ => {}
+    }
     match (key.as_str(), mods.shift) {
         ("t", true) => Some(Shortcut::NewShell),
         ("w", true) => Some(Shortcut::CloseSession),
@@ -49,6 +59,11 @@ pub fn match_shortcut(key: &str, mods: Mods) -> Option<Shortcut> {
 mod tests {
     use super::*;
 
+    const NONE_MODS: Mods = Mods {
+        ctrl: false,
+        alt: false,
+        shift: false,
+    };
     const CTRL: Mods = Mods {
         ctrl: true,
         alt: false,
@@ -71,6 +86,12 @@ mod tests {
         assert_eq!(match_shortcut("p", CTRL_SHIFT), Some(Shortcut::Palette));
         assert_eq!(match_shortcut("p", CTRL), None);
         assert_eq!(match_shortcut("j", CTRL_SHIFT), Some(Shortcut::NextWaiting));
+        assert_eq!(match_shortcut("=", CTRL), Some(Shortcut::ZoomIn));
+        assert_eq!(match_shortcut("+", CTRL_SHIFT), Some(Shortcut::ZoomIn));
+        assert_eq!(match_shortcut("-", CTRL), Some(Shortcut::ZoomOut));
+        assert_eq!(match_shortcut("0", CTRL), Some(Shortcut::ZoomReset));
+        assert_eq!(match_shortcut("0", CTRL_SHIFT), None);
+        assert_eq!(match_shortcut("=", NONE_MODS), None);
         assert_eq!(
             match_shortcut("w", CTRL_SHIFT),
             Some(Shortcut::CloseSession)

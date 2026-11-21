@@ -48,6 +48,8 @@ Build your workspaces from the window, no config editing needed:
   `Ctrl+Shift+O` to add to the selected project's workspace.
 - A new project is named after its folder, and its `repo` is read from the
   git `origin` remote so the Quests board picks up its tasks.
+- Click a workspace's name to **fold** it (its sessions keep running; the
+  header shows how many and whether an agent waits there).
 - Hover a workspace or project for **rename** (`✎`) and **remove** (`×`).
   Removing never touches files on disk, and anything with open sessions
   cannot be removed.
@@ -114,6 +116,7 @@ other agent can do the same from its own hooks or scripts.
 | `Ctrl+Shift+O` | Add folders to the selected workspace |
 | `Ctrl+Shift+P` | Command palette: open any agent in any project, go to a session, add folders |
 | `Ctrl+Shift+J` | Jump to the next agent waiting for you |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Bigger / smaller / default text (also `Ctrl` + mouse wheel) |
 
 castorterm exits when the last session closes.
 
