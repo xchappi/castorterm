@@ -517,7 +517,9 @@ impl WorkspaceView {
         };
         let active = self.tabs.active_id();
         let mut state = SavedState {
-            window: self.window_geometry,
+            // Never write a value that would not load back (NaN is written as
+            // null and would make the whole file unreadable).
+            window: self.window_geometry.filter(SavedWindow::is_sane),
             ..SavedState::default()
         };
         for (index, tab) in self.tabs.iter().enumerate() {
@@ -2092,7 +2094,28 @@ impl Render for WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use super::plural;
+    use super::{geometry, plural};
+    use gpui::{Bounds, WindowBounds, point, px, size};
+
+    #[test]
+    fn window_geometry_from_bounds() {
+        let rect = Bounds::new(point(px(10.0), px(20.0)), size(px(900.0), px(600.0)));
+        let windowed = geometry(WindowBounds::Windowed(rect));
+        assert_eq!(
+            (windowed.x, windowed.y, windowed.width, windowed.height),
+            (10.0, 20.0, 900.0, 600.0)
+        );
+        assert!(!windowed.maximized);
+        // Maximized and full screen keep the restore bounds and reopen maximized.
+        for bounds in [
+            WindowBounds::Maximized(rect),
+            WindowBounds::Fullscreen(rect),
+        ] {
+            let g = geometry(bounds);
+            assert!(g.maximized);
+            assert_eq!((g.width, g.height), (900.0, 600.0));
+        }
+    }
 
     #[test]
     fn plural_forms() {

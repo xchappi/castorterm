@@ -90,28 +90,36 @@ fn main() {
     });
 }
 
-/// Geometry of the last run, if it is plausible and still on a screen (a
-/// monitor may have been unplugged since).
+/// Geometry of the last run, placed on a connected screen (a monitor may
+/// have been unplugged since). Not used when restoring is turned off: the
+/// file is not kept up to date then.
 fn saved_window_bounds(settings: &config::Settings, cx: &App) -> Option<WindowBounds> {
+    if !settings.restore_sessions {
+        return None;
+    }
     let path = settings
         .config_path
         .as_ref()?
         .parent()?
         .join(restore::FILE_NAME);
-    let saved = restore::load(&path)
-        .window
-        .filter(restore::SavedWindow::is_sane)?;
+    let displays: Vec<(f32, f32, f32, f32)> = cx
+        .displays()
+        .iter()
+        .map(|d| {
+            let b = d.bounds();
+            (
+                b.origin.x.into(),
+                b.origin.y.into(),
+                b.size.width.into(),
+                b.size.height.into(),
+            )
+        })
+        .collect();
+    let saved = restore::load(&path).window?.place(&displays)?;
     let bounds = Bounds::new(
         point(px(saved.x), px(saved.y)),
         size(px(saved.width), px(saved.height)),
     );
-    let visible = cx
-        .displays()
-        .iter()
-        .any(|display| display.bounds().intersects(&bounds));
-    if !visible {
-        return None;
-    }
     Some(if saved.maximized {
         WindowBounds::Maximized(bounds)
     } else {

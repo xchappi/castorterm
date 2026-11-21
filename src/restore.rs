@@ -53,8 +53,13 @@ pub struct SavedWindow {
 
 impl SavedWindow {
     /// Smallest window worth restoring; smaller ones fall back to the default.
-    const MIN: f32 = 400.0;
+    const MIN_WIDTH: f32 = 400.0;
+    const MIN_HEIGHT: f32 = 300.0;
     const MAX: f32 = 20_000.0;
+    /// Part of the window that must be on a screen to restore it there.
+    const MIN_VISIBLE: f32 = 120.0;
+    /// Height of the title bar area that must stay reachable.
+    const TITLE_BAR: f32 = 40.0;
 
     /// Plausible values (a hand-edited or corrupt file never makes an
     /// unusable window).
@@ -63,8 +68,8 @@ impl SavedWindow {
             .iter()
             .all(|v| v.is_finite());
         finite
-            && (Self::MIN..=Self::MAX).contains(&self.width)
-            && (Self::MIN * 0.75..=Self::MAX).contains(&self.height)
+            && (Self::MIN_WIDTH..=Self::MAX).contains(&self.width)
+            && (Self::MIN_HEIGHT..=Self::MAX).contains(&self.height)
             && self.x.abs() <= Self::MAX * 4.0
             && self.y.abs() <= Self::MAX * 4.0
     }
@@ -156,6 +161,49 @@ pub fn plan(
         }
     }
     (sessions, active)
+}
+
+impl SavedWindow {
+    /// Where to restore the window among `displays` (`x, y, width, height`):
+    /// on the display it overlaps most, with at least [`Self::MIN_VISIBLE`]
+    /// pixels visible each way and its title bar on that display, shrunk to
+    /// fit it. `None` when it is on no connected display.
+    pub fn place(&self, displays: &[(f32, f32, f32, f32)]) -> Option<SavedWindow> {
+        if !self.is_sane() {
+            return None;
+        }
+        let overlap = |&(dx, dy, dw, dh): &(f32, f32, f32, f32)| {
+            let w = (self.x + self.width).min(dx + dw) - self.x.max(dx);
+            let h = (self.y + self.height).min(dy + dh) - self.y.max(dy);
+            (w, h)
+        };
+        let &(dx, dy, dw, dh) = displays
+            .iter()
+            .filter(|d| {
+                let (w, h) = overlap(d);
+                let (_, dy, _, dh) = **d;
+                w >= Self::MIN_VISIBLE
+                    && h >= Self::MIN_VISIBLE
+                    && self.y >= dy
+                    && self.y <= dy + dh - Self::TITLE_BAR
+            })
+            .max_by(|a, b| {
+                let area = |d| {
+                    let (w, h) = overlap(d);
+                    w * h
+                };
+                area(a).total_cmp(&area(b))
+            })?;
+        let width = self.width.min(dw);
+        let height = self.height.min(dh);
+        Some(SavedWindow {
+            x: self.x.clamp(dx, dx + dw - width),
+            y: self.y.clamp(dy, dy + dh - height),
+            width,
+            height,
+            maximized: self.maximized,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -275,6 +323,42 @@ mod tests {
         };
         let text = serde_json::to_string(&state).unwrap();
         assert_eq!(serde_json::from_str::<SavedState>(&text).unwrap(), state);
+    }
+
+    #[test]
+    fn placement_on_connected_displays() {
+        let main = (0.0, 0.0, 1920.0, 1080.0);
+        let left = (-1366.0, 200.0, 1366.0, 768.0);
+        let w = |x, y, width, height| SavedWindow {
+            x,
+            y,
+            width,
+            height,
+            maximized: false,
+        };
+        // Fully on the main display: unchanged.
+        assert_eq!(
+            w(100.0, 100.0, 900.0, 600.0).place(&[main]),
+            Some(w(100.0, 100.0, 900.0, 600.0))
+        );
+        // On the left monitor (negative x).
+        assert!(
+            w(-1200.0, 300.0, 900.0, 600.0)
+                .place(&[main, left])
+                .is_some()
+        );
+        // That monitor unplugged.
+        assert_eq!(w(-1200.0, 300.0, 900.0, 600.0).place(&[main]), None);
+        // Only a sliver visible: not restored there.
+        assert_eq!(w(1900.0, 100.0, 900.0, 600.0).place(&[main]), None);
+        // Title bar above the screen: not restored.
+        assert_eq!(w(100.0, -500.0, 900.0, 600.0).place(&[main]), None);
+        // Bigger than the display: shrunk and kept on it.
+        let big = w(-1366.0, 200.0, 1920.0, 1080.0).place(&[left]).unwrap();
+        assert_eq!((big.width, big.height), (1366.0, 768.0));
+        assert_eq!((big.x, big.y), (-1366.0, 200.0));
+        // Insane values never place.
+        assert_eq!(w(f32::NAN, 0.0, 900.0, 600.0).place(&[main]), None);
     }
 
     #[test]
