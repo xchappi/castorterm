@@ -18,6 +18,7 @@ mod task_worktree;
 use command_palette::Palette;
 use manage::{EditTarget, NameEditor};
 
+use crate::agent_status::{self, AgentStatus};
 use crate::board::{self, Status, Task as BoardTask};
 use crate::git_remote;
 use crate::provider;
@@ -51,6 +52,9 @@ const INITIAL_GRID: GridSize = GridSize {
     rows: 30,
 };
 
+/// How often agent status files are read.
+const STATUS_TICK: Duration = Duration::from_secs(1);
+
 /// How often the board timer checks whether a refresh is due.
 const BOARD_TICK: Duration = Duration::from_secs(5);
 
@@ -76,6 +80,8 @@ struct OpenSession {
     view: Entity<TerminalView>,
     /// Name of the launcher that started it, saved to restore it.
     launcher: String,
+    /// Where its agent reports its status (see `agent_status`).
+    status_file: Option<PathBuf>,
     /// Class colour of the launcher that started it.
     color: u32,
     _subscription: Subscription,
@@ -127,6 +133,13 @@ pub struct WorkspaceView {
     task_worktree: bool,
     /// Worktrees being created, so a double click starts only one.
     pending_worktrees: std::collections::HashSet<PathBuf>,
+    /// Folder of the per-session status files.
+    status_dir: Option<PathBuf>,
+    next_status_key: u64,
+    /// Last status reported by the agent of each session.
+    statuses: HashMap<SessionId, AgentStatus>,
+    statuses_loading: bool,
+    _status_timer: gpui::Task<()>,
     /// Focused while the name field or the palette owns the keyboard: keys
     /// then reach the root capture handler, and no terminal has focus.
     focus: FocusHandle,
@@ -141,6 +154,18 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> Self {
         let restore_sessions = settings.restore_sessions;
+        // Agents report their status through files; poll them every second.
+        let status_timer = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(STATUS_TICK).await;
+                if this
+                    .update(cx, |this, cx| this.refresh_statuses(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         let mut tree = ProjectTree::from_config(&settings.workspaces);
         let initial_project = tree.project_for_dir(&launch_dir);
         // Refreshes the visible board when it is due; stops with the view.
@@ -192,9 +217,23 @@ impl WorkspaceView {
             focus: cx.focus_handle(),
             task_worktree: false,
             pending_worktrees: Default::default(),
+            status_dir: None,
+            next_status_key: 0,
+            statuses: HashMap::new(),
+            statuses_loading: false,
+            _status_timer: status_timer,
         };
         if let Some(node) = this.tree.projects.get(initial_project) {
             this.expand_dir(node.path.clone(), cx);
+        }
+        this.status_dir = this
+            .config_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|dir| dir.join(agent_status::DIR_NAME))
+            .filter(|dir| std::fs::create_dir_all(dir).is_ok());
+        if let Some(dir) = &this.status_dir {
+            agent_status::remove_stale(dir);
         }
         let state_path = this
             .config_path
@@ -253,7 +292,16 @@ impl WorkspaceView {
         }
 
         let (events_tx, events_rx) = mpsc::unbounded();
-        let session = match Session::spawn(INITIAL_GRID, Some(node.path.clone()), events_tx) {
+        self.next_status_key += 1;
+        let status_file = self
+            .status_dir
+            .as_ref()
+            .map(|dir| agent_status::file_for(dir, self.next_status_key));
+        let env = status_file
+            .iter()
+            .map(|f| (agent_status::ENV_VAR.to_string(), f.display().to_string()))
+            .collect();
+        let session = match Session::spawn(INITIAL_GRID, Some(node.path.clone()), env, events_tx) {
             Ok(session) => session,
             Err(err) => {
                 self.launch_error = Some(format!("{err:#}"));
@@ -275,6 +323,7 @@ impl WorkspaceView {
             OpenSession {
                 view,
                 launcher: launcher.name.clone(),
+                status_file,
                 color,
                 _subscription: subscription,
             },
@@ -309,6 +358,10 @@ impl WorkspaceView {
             return;
         };
         session.view.read(cx).shutdown();
+        if let Some(file) = &session.status_file {
+            let _ = std::fs::remove_file(file);
+        }
+        self.statuses.remove(&id);
         self.save_state();
         if self.tabs.is_empty() {
             cx.quit();
@@ -358,6 +411,48 @@ impl WorkspaceView {
             self.focus_active(window, cx);
         }
         opened.iter().any(Option::is_some)
+    }
+
+    /// Reads the status files of the open sessions on a background thread.
+    fn refresh_statuses(&mut self, cx: &mut Context<Self>) {
+        if self.statuses_loading {
+            return;
+        }
+        let files: Vec<(SessionId, PathBuf)> = self
+            .tabs
+            .iter()
+            .filter_map(|t| t.handle.status_file.clone().map(|f| (t.id, f)))
+            .collect();
+        if files.is_empty() {
+            return;
+        }
+        self.statuses_loading = true;
+        cx.spawn(async move |this, cx| {
+            let statuses = cx
+                .background_spawn(async move {
+                    files
+                        .into_iter()
+                        .filter_map(|(id, f)| agent_status::read(&f).map(|s| (id, s)))
+                        .collect::<HashMap<_, _>>()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.statuses_loading = false;
+                if this.statuses != statuses {
+                    this.statuses = statuses;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Sessions whose agent is waiting for the user.
+    fn waiting_count(&self) -> usize {
+        self.statuses
+            .values()
+            .filter(|s| **s == AgentStatus::Waiting)
+            .count()
     }
 
     /// Terminals take input only while neither the name field nor the
@@ -750,6 +845,7 @@ impl WorkspaceView {
 
     fn render_hud(&self) -> impl IntoElement {
         let sessions = self.tabs.iter().count();
+        let waiting = self.waiting_count();
         let content = div()
             .flex()
             .items_center()
@@ -781,6 +877,9 @@ impl WorkspaceView {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .when(waiting > 0, |d| {
+                        d.child(chip(format!("{waiting} waiting for you"), TITLE))
+                    })
                     .child(chip(
                         format!("{sessions} {}", plural(sessions, "session", "sessions")),
                         ACCENT,
@@ -880,6 +979,7 @@ impl WorkspaceView {
                                     })
                                     .child(dot(color, 7.0, is_active))
                                     .child(SharedString::from(tab.label.clone()))
+                                    .children(self.statuses.get(&id).map(|s| status_badge(*s)))
                                     .on_click(cx.listener(
                                         move |this, _: &ClickEvent, window, cx| {
                                             this.activate(id, window, cx)
@@ -1650,6 +1750,7 @@ impl WorkspaceView {
                         .text_color(rgb(if is_active { TEXT } else { MUTED }))
                         .child(SharedString::from(tab.label.clone())),
                 )
+                .children(self.statuses.get(&id).map(|s| status_badge(*s)))
                 .child(
                     div()
                         .text_color(rgb(MUTED))
@@ -1794,6 +1895,28 @@ fn launcher_button(id: impl Into<ElementId>, text: String, color: u32) -> Statef
         })
         .active(move |s| s.bg(rgba(with_alpha(color, 0x55))))
         .child(SharedString::from(text))
+}
+
+/// Small label with what an agent is doing; waiting stands out.
+fn status_badge(status: AgentStatus) -> Div {
+    let (text, color) = match status {
+        AgentStatus::Working => ("working", ACCENT),
+        AgentStatus::Waiting => ("waiting", TITLE),
+        AgentStatus::Done => ("done", MUTED),
+    };
+    div()
+        .flex_none()
+        .px_1()
+        .rounded_sm()
+        .text_size(px(SMALL_TEXT_SIZE))
+        .text_color(rgb(color))
+        .border_1()
+        .border_color(rgba(with_alpha(color, 0x88)))
+        .when(status == AgentStatus::Waiting, |d| {
+            d.bg(rgba(with_alpha(color, 0x22)))
+                .shadow(glow(color, 0x66, 6.0))
+        })
+        .child(text)
 }
 
 fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {

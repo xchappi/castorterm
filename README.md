@@ -74,6 +74,29 @@ then work on the same repository at once without touching each other's files.
 Removing that project from the sidebar does not delete the worktree; use
 `git worktree remove` when you are done.
 
+### Agent status
+
+Agents can tell castorterm what they are doing: each session shows
+`working`, `waiting` or `done`, and the HUD counts the agents waiting for
+you. castorterm gives every session a `CASTORTERM_STATUS_FILE` variable;
+an agent hook runs `castorterm --status <working|waiting|done>`, which writes
+there (and does nothing outside castorterm). For Claude Code, add to
+`~/.claude/settings.json` (use the full path to `castorterm` if it is not in
+your `PATH`):
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "castorterm --status working" }] }],
+    "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "castorterm --status working" }] }],
+    "Notification": [{ "hooks": [{ "type": "command", "command": "castorterm --status waiting" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "castorterm --status done" }] }]
+  }
+}
+```
+
+Any other agent can do the same from its own hooks or scripts.
+
 | Shortcut | Action |
 |---|---|
 | `Ctrl+Shift+T` | New shell in the current project |
