@@ -16,4 +16,4 @@
 
 - [x] 3.1 README: layout, explorer and shortcut
 - [x] 3.2 Screenshots on Windows: layout, expand folders, click a file inserts its path
-- [ ] 3.3 CI green on Windows, macOS and Linux
+- [x] 3.3 CI green on Windows, macOS and Linux
