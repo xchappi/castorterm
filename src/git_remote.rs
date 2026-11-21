@@ -1,5 +1,6 @@
-//! Detects a project's `owner/repo` from its git `origin` remote, so new
-//! projects get a `repo` for the Quests board without extra setup.
+//! Reads a project's git state from disk: the `owner/repo` of its `origin`
+//! remote (so new projects get a `repo` for the Quests board) and its
+//! current branch (shown in the sidebar).
 
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf, Prefix};
@@ -22,10 +23,48 @@ pub fn detect_repo(dir: &Path) -> Option<String> {
     repo_from_url(&url).filter(|r| valid_repo(r))
 }
 
-/// The `.git` directory: a directory, or a file with `gitdir: <path>`
-/// (worktrees and submodules). For a linked worktree the remotes live in the
-/// main repository's config, found through `commondir`.
+/// Longest branch name shown.
+const MAX_BRANCH_CHARS: usize = 60;
+
+/// Current branch of the repository at `dir`, or the short commit id when
+/// HEAD is detached. Same safety rules as [`detect_repo`].
+pub fn current_branch(dir: &Path) -> Option<String> {
+    let head = read_local(dir, &own_git_dir(dir)?.join("HEAD"))?;
+    let head = head.lines().next()?.trim();
+    let name = match head.strip_prefix("ref:") {
+        Some(reference) => {
+            let reference = reference.trim();
+            reference
+                .strip_prefix("refs/heads/")
+                .unwrap_or(reference)
+                .to_string()
+        }
+        None if head.len() >= 7 && head.chars().all(|c| c.is_ascii_hexdigit()) => {
+            format!("@{}", &head[..7])
+        }
+        None => return None,
+    };
+    let name: String = name
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_BRANCH_CHARS)
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// The repository's directory with the shared files (config): for a linked
+/// worktree the main repository's, found through `commondir`.
 fn git_dir(dir: &Path) -> Option<PathBuf> {
+    let git_dir = own_git_dir(dir)?;
+    match read_local(dir, &git_dir.join("commondir")) {
+        Some(common) => local(git_dir.join(common.trim())),
+        None => Some(git_dir),
+    }
+}
+
+/// The `.git` directory of this checkout (where `HEAD` lives): a directory,
+/// or a file with `gitdir: <path>` (worktrees and submodules).
+fn own_git_dir(dir: &Path) -> Option<PathBuf> {
     let dot_git = dir.join(".git");
     let meta = std::fs::symlink_metadata(&dot_git).ok()?;
     let git_dir = if meta.is_dir() {
@@ -38,10 +77,7 @@ fn git_dir(dir: &Path) -> Option<PathBuf> {
         // A symlinked .git could point anywhere.
         return None;
     };
-    match read_local(dir, &git_dir.join("commondir")) {
-        Some(common) => local(git_dir.join(common.trim())),
-        None => Some(git_dir),
-    }
+    Some(git_dir)
 }
 
 /// `path` if it is on a local drive (not UNC, not a device path).
@@ -297,6 +333,41 @@ mod tests {
         assert!(!goes_through_link(&dir, &dir.join("missing/x")));
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn branches_of_a_checkout_and_a_worktree() {
+        let main = temp_dir("branch");
+        std::fs::create_dir_all(main.join(".git/worktrees/wt")).unwrap();
+        std::fs::write(main.join(".git/HEAD"), "ref: refs/heads/feat/x\n").unwrap();
+        assert_eq!(current_branch(&main).as_deref(), Some("feat/x"));
+        std::fs::write(
+            main.join(".git/HEAD"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .unwrap();
+        assert_eq!(current_branch(&main).as_deref(), Some("@0123456"));
+        std::fs::write(main.join(".git/HEAD"), "garbage\n").unwrap();
+        assert_eq!(current_branch(&main), None);
+
+        // A worktree has its own HEAD in its gitdir.
+        let wt = temp_dir("branch-wt");
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", main.join(".git/worktrees/wt").display()),
+        )
+        .unwrap();
+        std::fs::write(
+            main.join(".git/worktrees/wt/HEAD"),
+            "ref: refs/heads/task-1\n",
+        )
+        .unwrap();
+        std::fs::write(main.join(".git/worktrees/wt/commondir"), "../..\n").unwrap();
+        assert_eq!(current_branch(&wt).as_deref(), Some("task-1"));
+        assert_eq!(current_branch(&temp_dir("no-git")), None);
+
+        std::fs::remove_dir_all(main).unwrap();
+        std::fs::remove_dir_all(wt).unwrap();
     }
 
     #[test]

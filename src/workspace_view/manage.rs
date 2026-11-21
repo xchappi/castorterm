@@ -260,6 +260,7 @@ impl WorkspaceView {
             }
             // New repositories change what the board lists.
             self.boards.remove(&workspace);
+            self.refresh_branches(cx);
         }
         if let Some(project) = last {
             self.select_project(project, cx);

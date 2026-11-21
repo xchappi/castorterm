@@ -16,6 +16,7 @@ mod manage;
 use manage::{EditTarget, NameEditor};
 
 use crate::board::{self, Status, Task as BoardTask};
+use crate::git_remote;
 use crate::provider;
 
 use crate::config::Settings;
@@ -105,6 +106,11 @@ pub struct WorkspaceView {
     notice: Option<String>,
     /// Paused while the name field owns the keyboard.
     input_gate: InputGate,
+    /// Current git branch by project, refreshed in the background.
+    branches: HashMap<usize, String>,
+    branches_loading: bool,
+    /// Title last set on the window, to set it only when it changes.
+    shown_title: String,
 }
 
 impl WorkspaceView {
@@ -122,7 +128,10 @@ impl WorkspaceView {
             loop {
                 cx.background_executor().timer(BOARD_TICK).await;
                 if this
-                    .update(cx, |this, cx| this.refresh_board_if_due(cx))
+                    .update(cx, |this, cx| {
+                        this.refresh_board_if_due(cx);
+                        this.refresh_branches(cx);
+                    })
                     .is_err()
                 {
                     break;
@@ -154,11 +163,15 @@ impl WorkspaceView {
             editor: None,
             notice: None,
             input_gate: InputGate::default(),
+            branches: HashMap::new(),
+            branches_loading: false,
+            shown_title: String::new(),
         };
         if let Some(node) = this.tree.projects.get(initial_project) {
             this.expand_dir(node.path.clone(), cx);
         }
         this.launch(initial_project, SHELL_LAUNCHER, window, cx);
+        this.refresh_branches(cx);
         this
     }
 
@@ -274,17 +287,23 @@ impl WorkspaceView {
 
     /// Gives keyboard focus to the active terminal and updates the title.
     fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.active() else {
-            window.set_window_title("castorterm");
-            return;
-        };
         // The name field keeps the keyboard until it closes.
-        if self.editor.is_none() {
+        if let (Some(tab), None) = (self.tabs.active(), &self.editor) {
             let handle = tab.handle.view.read(cx).focus_handle(cx);
             window.focus(&handle);
         }
+    }
+
+    /// `session · project (branch) — castorterm`.
+    fn window_title(&self) -> String {
+        let Some(tab) = self.tabs.active() else {
+            return "castorterm".into();
+        };
         let name = &self.tree.projects[tab.project].name;
-        window.set_window_title(&format!("{} · {name} — castorterm", tab.label));
+        match self.branches.get(&tab.project) {
+            Some(branch) => format!("{} · {name} ({branch}) — castorterm", tab.label),
+            None => format!("{} · {name} — castorterm", tab.label),
+        }
     }
 
     /// Selects a project. When the selection changes, its root is expanded
@@ -351,6 +370,40 @@ impl WorkspaceView {
         self.middle_tab = tab;
         self.refresh_board_if_due(cx);
         cx.notify();
+    }
+
+    /// Reads the git branch of every listed project on a background thread
+    /// (agents switch branches, so this runs with the board timer).
+    pub(crate) fn refresh_branches(&mut self, cx: &mut Context<Self>) {
+        if self.branches_loading {
+            return;
+        }
+        let projects: Vec<(usize, PathBuf)> = self
+            .tree
+            .workspaces
+            .iter()
+            .flat_map(|w| w.projects.iter().copied())
+            .map(|p| (p, self.tree.projects[p].path.clone()))
+            .collect();
+        self.branches_loading = true;
+        cx.spawn(async move |this, cx| {
+            let branches = cx
+                .background_spawn(async move {
+                    projects
+                        .into_iter()
+                        .filter_map(|(p, path)| git_remote::current_branch(&path).map(|b| (p, b)))
+                        .collect::<HashMap<_, _>>()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.branches_loading = false;
+                if this.branches != branches {
+                    this.branches = branches;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Loads the visible board if it was never loaded or `refresh_secs` passed.
@@ -708,13 +761,31 @@ impl WorkspaceView {
                                         .child(if selected { "›" } else { "" }),
                                 )
                                 .child(
+                                    // The name wins over the branch when space is short.
+                                    div()
+                                        .flex_shrink_0()
+                                        .max_w(px(130.0))
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(SharedString::from(node.name.clone())),
+                                )
+                                // Always present: it also pushes the actions right.
+                                .child(
                                     div()
                                         .flex_1()
                                         .min_w(px(0.0))
                                         .overflow_hidden()
                                         .text_ellipsis()
                                         .whitespace_nowrap()
-                                        .child(SharedString::from(node.name.clone())),
+                                        .font_weight(FontWeight::NORMAL)
+                                        .text_size(px(SMALL_TEXT_SIZE))
+                                        .text_color(rgba(with_alpha(WORKSPACE, 0xaa)))
+                                        .children(
+                                            self.branches
+                                                .get(&project)
+                                                .map(|b| SharedString::from(b.clone())),
+                                        ),
                                 )
                                 .when(removable, |d| {
                                     d.child(
@@ -1559,7 +1630,12 @@ fn theme_bg() -> Rgba {
 }
 
 impl Render for WorkspaceView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let title = self.window_title();
+        if title != self.shown_title {
+            window.set_window_title(&title);
+            self.shown_title = title;
+        }
         let terminal = match self.tabs.active() {
             Some(tab) => {
                 let color = tab.handle.color;
