@@ -385,9 +385,6 @@ impl WorkspaceView {
                 }
             }
             TerminalEvent::Cwd(dir) => {
-                if std::env::var_os("CASTORTERM_DEBUG_CWD").is_some() {
-                    eprintln!("DEBUGCWD {dir}");
-                }
                 if let Some(id) = self.tabs.find(|s| s.view == *emitter) {
                     self.cwds.insert(id, PathBuf::from(dir));
                     cx.notify();
@@ -407,6 +404,7 @@ impl WorkspaceView {
             let _ = std::fs::remove_file(file);
         }
         self.statuses.remove(&id);
+        self.cwds.remove(&id);
         self.save_state();
         if self.tabs.is_empty() {
             cx.quit();
@@ -583,6 +581,13 @@ impl WorkspaceView {
         if let Some(id) = next {
             self.activate(id, window, cx);
         }
+    }
+
+    /// Where a session's shell is, relative to its project, when it is not
+    /// the project root.
+    fn session_cwd_label(&self, tab: &crate::tabs::Tab<OpenSession>) -> Option<String> {
+        let cwd = self.cwds.get(&tab.id)?;
+        crate::tree::cwd_label(&self.tree.projects[tab.project].path, cwd)
     }
 
     /// Sessions whose agent is waiting for the user.
@@ -1127,6 +1132,16 @@ impl WorkspaceView {
                                     })
                                     .child(dot(color, 7.0, is_active))
                                     .child(SharedString::from(tab.label.clone()))
+                                    .children(self.session_cwd_label(tab).map(|dir| {
+                                        div()
+                                            .min_w(px(0.0))
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .text_size(ui(SMALL_TEXT_SIZE))
+                                            .text_color(rgb(MUTED))
+                                            .child(SharedString::from(dir))
+                                    }))
                                     .children(self.statuses.get(&id).map(|s| status_badge(*s)))
                                     .on_click(cx.listener(
                                         move |this, _: &ClickEvent, window, cx| {
@@ -1947,11 +1962,12 @@ impl WorkspaceView {
                         .child(SharedString::from(tab.label.clone())),
                 )
                 .children(self.statuses.get(&id).map(|s| status_badge(*s)))
-                .child(
-                    div()
-                        .text_color(rgb(MUTED))
-                        .child(SharedString::from(format!("· {project}"))),
-                )
+                .child(div().text_color(rgb(MUTED)).child(SharedString::from(
+                    match self.session_cwd_label(tab) {
+                        Some(dir) => format!("· {project} · {dir}"),
+                        None => format!("· {project}"),
+                    },
+                )))
                 .child(
                     div()
                         .id(("close", id))

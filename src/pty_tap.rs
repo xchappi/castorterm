@@ -106,14 +106,11 @@ pub fn cwd_from_osc(payload: &str) -> Option<String> {
         }
     } else if let Some(path) = payload.strip_prefix("9;9;") {
         path.trim_matches('"').to_string()
-    } else if let Some(path) = payload
-        .strip_prefix("0;")
-        .or_else(|| payload.strip_prefix("2;"))
-        .and_then(|title| title.strip_prefix(TITLE_PREFIX))
-    {
-        path.to_string()
     } else {
-        return None;
+        let title = payload
+            .strip_prefix("0;")
+            .or_else(|| payload.strip_prefix("2;"))?;
+        title.strip_prefix(TITLE_PREFIX)?.to_string()
     };
     let clean = !path.is_empty() && !path.chars().any(char::is_control);
     clean.then_some(path)
@@ -189,7 +186,12 @@ impl EventedReadWrite for TapPty {
     type Reader = TapReader;
     type Writer = <tty::Pty as EventedReadWrite>::Writer;
 
-    unsafe fn register(&mut self, poll: &Arc<Poller>, event: Event, mode: PollMode) -> io::Result<()> {
+    unsafe fn register(
+        &mut self,
+        poll: &Arc<Poller>,
+        event: Event,
+        mode: PollMode,
+    ) -> io::Result<()> {
         // SAFETY: forwarded; the caller upholds the same contract.
         unsafe { self.inner.register(poll, event, mode) }
     }
@@ -229,16 +231,28 @@ mod tests {
 
     #[test]
     fn osc7_and_osc99() {
-        assert_eq!(cwd_from_osc("7;file://host/home/me/src").as_deref(), Some("/home/me/src"));
-        assert_eq!(cwd_from_osc("7;file:///C:/Users/me%20x").as_deref(), Some("C:/Users/me x"));
-        assert_eq!(cwd_from_osc("9;9;D:\\proyectos").as_deref(), Some("D:\\proyectos"));
+        assert_eq!(
+            cwd_from_osc("7;file://host/home/me/src").as_deref(),
+            Some("/home/me/src")
+        );
+        assert_eq!(
+            cwd_from_osc("7;file:///C:/Users/me%20x").as_deref(),
+            Some("C:/Users/me x")
+        );
+        assert_eq!(
+            cwd_from_osc("9;9;D:\\proyectos").as_deref(),
+            Some("D:\\proyectos")
+        );
         assert_eq!(cwd_from_osc("9;9;\"C:\\a b\"").as_deref(), Some("C:\\a b"));
         assert_eq!(cwd_from_osc("0;title"), None);
         assert_eq!(
             cwd_from_osc("0;castorterm:cwd:D:\\src\\app").as_deref(),
             Some("D:\\src\\app")
         );
-        assert_eq!(cwd_from_osc("2;castorterm:cwd:/tmp").as_deref(), Some("/tmp"));
+        assert_eq!(
+            cwd_from_osc("2;castorterm:cwd:/tmp").as_deref(),
+            Some("/tmp")
+        );
         assert_eq!(cwd_from_osc("0;castorterm:cwd:"), None);
         assert_eq!(cwd_from_osc("7;http://x/y"), None);
         assert_eq!(cwd_from_osc("7;file://host/a%0Ab"), None);

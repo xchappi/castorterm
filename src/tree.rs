@@ -199,6 +199,36 @@ impl ProjectTree {
     }
 }
 
+/// Short label for a session's working directory, or `None` when it is the
+/// project root (nothing to add). Inside the project: the relative path
+/// (`src/view`); elsewhere: the last two components (`…/a/b`).
+pub fn cwd_label(project: &Path, cwd: &Path) -> Option<String> {
+    let normalize = |p: &Path| {
+        let text = p.to_string_lossy().replace('\\', "/");
+        let text = text.trim_end_matches('/').to_string();
+        if cfg!(windows) {
+            text.to_lowercase()
+        } else {
+            text
+        }
+    };
+    let (root, dir) = (normalize(project), normalize(cwd));
+    if dir == root {
+        return None;
+    }
+    let shown = cwd.to_string_lossy().replace('\\', "/");
+    let shown = shown.trim_end_matches('/');
+    if let Some(rest) = dir.strip_prefix(&format!("{root}/")) {
+        // Same length in the original spelling: keep its case.
+        return Some(shown[shown.len() - rest.len()..].to_string());
+    }
+    let parts: Vec<&str> = shown.split('/').filter(|p| !p.is_empty()).collect();
+    Some(match parts.as_slice() {
+        [_] | [_, _] | [] => shown.to_string(),
+        [.., a, b] => format!("…/{a}/{b}"),
+    })
+}
+
 /// Project node for a folder added from the UI: named after the folder.
 pub fn project_node(dir: &Path, repo: Option<String>) -> ProjectNode {
     ProjectNode {
@@ -335,6 +365,34 @@ mod tests {
         assert!(tree.workspaces[1].implicit);
         // Names stay unique: saving the implicit one never hits the user's.
         assert_eq!(tree.workspaces[1].name, "Local 2");
+    }
+
+    #[test]
+    fn cwd_labels() {
+        let root = Path::new("/src/app");
+        assert_eq!(cwd_label(root, Path::new("/src/app")), None);
+        assert_eq!(cwd_label(root, Path::new("/src/app/")), None);
+        assert_eq!(
+            cwd_label(root, Path::new("/src/app/src/view")).as_deref(),
+            Some("src/view")
+        );
+        assert_eq!(
+            cwd_label(root, Path::new("/src/apple")).as_deref(),
+            Some("/src/apple")
+        );
+        assert_eq!(cwd_label(root, Path::new("/tmp")).as_deref(), Some("/tmp"));
+        assert_eq!(
+            cwd_label(root, Path::new("/a/b/c/d")).as_deref(),
+            Some("…/c/d")
+        );
+        if cfg!(windows) {
+            let root = Path::new(r"D:\proyectos\castorterm");
+            assert_eq!(cwd_label(root, Path::new(r"d:\Proyectos\castorterm")), None);
+            assert_eq!(
+                cwd_label(root, Path::new(r"D:\proyectos\castorterm\src")).as_deref(),
+                Some("src")
+            );
+        }
     }
 
     #[test]
