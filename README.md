@@ -66,6 +66,14 @@ right project, with the task as its prompt. Providers are small programs
 that print JSON; see [docs/providers.md](docs/providers.md) and the GitHub
 Issues example in [`examples/`](examples/).
 
+Tick **In a new worktree** on a task to give the agent its own checkout:
+castorterm runs `git worktree add` to create `<project>.worktrees/<task>` on
+branch `task/<task>` next to the project (or reuses it), adds it to the
+workspace as `<project>@<task>` and starts the agent there. Several agents can
+then work on the same repository at once without touching each other's files.
+Removing that project from the sidebar does not delete the worktree; use
+`git worktree remove` when you are done.
+
 | Shortcut | Action |
 |---|---|
 | `Ctrl+Shift+T` | New shell in the current project |

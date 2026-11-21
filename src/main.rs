@@ -23,6 +23,7 @@ mod theme;
 mod tree;
 mod view;
 mod workspace_view;
+mod worktree;
 
 use gpui::{
     App, AppContext as _, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px,
