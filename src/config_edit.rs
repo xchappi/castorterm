@@ -79,15 +79,26 @@ pub fn apply(text: &str, edit: &Edit, home: Option<&Path>) -> Result<String, Str
             let Some(table) = find_workspace(&mut doc, from)? else {
                 return Err(format!("workspace '{from}' is not in the config file"));
             };
-            table["name"] = value(to.as_str());
+            // Replace only the value: the line keeps its comment.
+            match table.get_mut("name").and_then(Item::as_value_mut) {
+                Some(name) => {
+                    let decor = name.decor().clone();
+                    *name = Value::from(to.trim());
+                    *name.decor_mut() = decor;
+                }
+                None => table["name"] = value(to.trim()),
+            }
         }
         Edit::RemoveWorkspace { name } => {
             let list = workspaces(&mut doc)?;
-            let before = list.len();
-            list.retain(|t| workspace_name(t) != Some(name.as_str()));
-            if list.len() == before {
+            // Only the first match: the UI removes one workspace.
+            let Some(index) = list
+                .iter()
+                .position(|t| workspace_name(t) == Some(name.trim()))
+            else {
                 return Err(format!("workspace '{name}' is not in the config file"));
-            }
+            };
+            list.remove(index);
         }
         Edit::AddProjects {
             workspace,
@@ -96,7 +107,9 @@ pub fn apply(text: &str, edit: &Edit, home: Option<&Path>) -> Result<String, Str
             if find_workspace(&mut doc, workspace)?.is_none() {
                 workspaces(&mut doc)?.push(new_workspace(workspace));
             }
-            let table = find_workspace(&mut doc, workspace)?.expect("just added");
+            let Some(table) = find_workspace(&mut doc, workspace)? else {
+                return Err(format!("could not add workspace '{workspace}'"));
+            };
             for project in projects {
                 if !has_project(table, &project.path, home) {
                     push_project(table, project)?;
@@ -118,8 +131,11 @@ pub fn apply(text: &str, edit: &Edit, home: Option<&Path>) -> Result<String, Str
 }
 
 /// Reads the config file (empty if missing), applies `edit` and writes it
-/// back atomically, creating its directory if needed.
+/// back atomically, creating its directory if needed. A symlinked config
+/// (dotfiles) is updated at its target, keeping the link.
 pub fn save(path: &Path, edit: &Edit, home: Option<&Path>) -> Result<(), String> {
+    let resolved = std::fs::canonicalize(path).ok();
+    let path = resolved.as_deref().unwrap_or(path);
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
@@ -130,17 +146,29 @@ pub fn save(path: &Path, edit: &Edit, home: Option<&Path>) -> Result<(), String>
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
     }
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, updated).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
+    // Unique temporary name: several castorterm windows may save at once.
+    let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
+    write_synced(&tmp, updated.as_bytes()).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("could not write {}: {e}", tmp.display())
+    })?;
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("could not replace {}: {e}", path.display())
     })
 }
 
+/// Writes and flushes to disk, so a crash never leaves an empty config.
+fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
 fn new_workspace(name: &str) -> Table {
     let mut table = Table::new();
-    table["name"] = value(name);
+    table["name"] = value(name.trim());
     table
 }
 
@@ -150,7 +178,7 @@ fn workspaces(doc: &mut DocumentMut) -> Result<&mut ArrayOfTables, String> {
         doc.insert("workspaces", Item::ArrayOfTables(ArrayOfTables::new()));
     }
     doc["workspaces"].as_array_of_tables_mut().ok_or_else(|| {
-        "`workspaces` in the config file is not a list of [[workspaces]] tables".into()
+        "workspaces in the config file are written inline; use [[workspaces]] tables to edit them from the window".into()
     })
 }
 
@@ -164,7 +192,7 @@ fn find_workspace<'a>(
 ) -> Result<Option<&'a mut Table>, String> {
     Ok(workspaces(doc)?
         .iter_mut()
-        .find(|t| workspace_name(t) == Some(name)))
+        .find(|t| workspace_name(t) == Some(name.trim())))
 }
 
 /// Same project path, comparing the stored text and its `~` expansion.
@@ -235,19 +263,20 @@ fn push_project(table: &mut Table, project: &ProjectEntry) -> Result<(), String>
 
 fn remove_project(table: &mut Table, path: &str, home: Option<&Path>) -> bool {
     match table.get_mut("projects") {
+        // Only the first match: the UI removes one project.
         Some(Item::ArrayOfTables(list)) => {
-            let before = list.len();
-            list.retain(|t| !t.path().is_some_and(|p| same_path(p, path, home)));
-            list.len() != before
+            let found = list
+                .iter()
+                .position(|t| t.path().is_some_and(|p| same_path(p, path, home)));
+            found.map(|index| list.remove(index)).is_some()
         }
         Some(Item::Value(Value::Array(list))) => {
-            let before = list.len();
-            list.retain(|v| {
-                !v.as_inline_table()
+            let found = list.iter().position(|v| {
+                v.as_inline_table()
                     .and_then(|t| t.path())
                     .is_some_and(|p| same_path(p, path, home))
             });
-            list.len() != before
+            found.map(|index| list.remove(index)).is_some()
         }
         _ => false,
     }
@@ -501,6 +530,66 @@ command = "tasks"
     }
 
     #[test]
+    fn rename_keeps_the_line_comment() {
+        let text = "[[workspaces]]\nname = \"A\" # main one\n";
+        let out = apply(
+            text,
+            &Edit::RenameWorkspace {
+                from: "A".into(),
+                to: "B".into(),
+            },
+            None,
+        )
+        .unwrap();
+        assert!(out.contains("name = \"B\" # main one"), "{out}");
+    }
+
+    #[test]
+    fn duplicates_are_removed_one_at_a_time() {
+        let text = format!(
+            "[[workspaces]]\nname = \"W\"\n[[workspaces.projects]]\nname = \"a\"\npath = \"{p}\"\n[[workspaces.projects]]\nname = \"a2\"\npath = \"{p}\"\n\n[[workspaces]]\nname = \"W\"\n",
+            p = abs("/a")
+        );
+        let out = apply(
+            &text,
+            &Edit::RemoveProject {
+                workspace: "W".into(),
+                path: abs("/a"),
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(out.matches("[[workspaces.projects]]").count(), 1);
+        let out = apply(&out, &Edit::RemoveWorkspace { name: "W".into() }, None).unwrap();
+        assert_eq!(out.matches("[[workspaces]]").count(), 1);
+    }
+
+    #[test]
+    fn inline_workspaces_get_a_clear_error() {
+        let err = apply(
+            "workspaces = []\n",
+            &Edit::AddWorkspace { name: "W".into() },
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("inline"), "{err}");
+    }
+
+    #[test]
+    fn untrimmed_names_never_panic() {
+        let out = apply(
+            "",
+            &Edit::AddProjects {
+                workspace: "  W ".into(),
+                projects: vec![entry("p", &abs("/p"), None)],
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(workspaces_of(&out)[0].0, "W");
+    }
+
+    #[test]
     fn broken_file_is_not_touched() {
         let err = apply(
             "[[workspaces]\nname=",
@@ -541,7 +630,10 @@ command = "tasks"
         .unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(workspaces_of(&text)[0].1.len(), 1);
-        assert!(!path.with_extension("toml.tmp").exists());
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

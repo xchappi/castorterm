@@ -413,8 +413,9 @@ impl WorkspaceView {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                let state = this.boards.entry(workspace).or_default();
-                if state.ticket == ticket {
+                // By ticket, not by index: removing a workspace while this
+                // ran shifts the indices. Tickets are unique.
+                if let Some(state) = this.boards.values_mut().find(|s| s.ticket == ticket) {
                     state.listing = Some(result);
                     state.loading = false;
                     state.loaded_at = Some(Instant::now());
@@ -785,8 +786,8 @@ impl WorkspaceView {
                                 ACCENT,
                             )
                             .on_click(cx.listener(
-                                move |this, _: &ClickEvent, _, cx| {
-                                    this.open_editor(EditTarget::Rename(w_index), cx)
+                                move |this, _: &ClickEvent, window, cx| {
+                                    this.open_editor(EditTarget::Rename(w_index), window, cx)
                                 },
                             )),
                         )
@@ -865,12 +866,11 @@ impl WorkspaceView {
                             .text_color(rgb(ACCENT))
                             .hover(|s| s.bg(rgba(with_alpha(ACCENT, 0x22))))
                             .child("+ Workspace")
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 if this.editor.is_some() {
-                                    this.editor = None;
-                                    cx.notify();
+                                    this.close_editor(window, cx);
                                 } else {
-                                    this.open_editor(EditTarget::NewWorkspace, cx);
+                                    this.open_editor(EditTarget::NewWorkspace, window, cx);
                                 }
                             })),
                     ),

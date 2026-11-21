@@ -58,7 +58,13 @@ impl ProjectTree {
     /// Project whose path is `dir`; if none, adds a project named after the
     /// directory to the implicit "Local" workspace. Returns its index.
     pub fn project_for_dir(&mut self, dir: &Path) -> usize {
-        if let Some(index) = self.projects.iter().position(|p| same_dir(&p.path, dir)) {
+        // Only projects still in a workspace (removed ones stay as tombstones).
+        let listed = self
+            .workspaces
+            .iter()
+            .flat_map(|w| w.projects.iter().copied())
+            .find(|&p| same_dir(&self.projects[p].path, dir));
+        if let Some(index) = listed {
             return index;
         }
         let name = dir
@@ -73,12 +79,15 @@ impl ProjectTree {
         });
         match self.workspaces.iter_mut().find(|w| w.implicit) {
             Some(local) => local.projects.push(index),
-            None => self.workspaces.push(WorkspaceNode {
-                name: LOCAL_WORKSPACE.into(),
-                projects: vec![index],
-                implicit: true,
-                board: None,
-            }),
+            None => {
+                let name = self.unique_name(LOCAL_WORKSPACE);
+                self.workspaces.push(WorkspaceNode {
+                    name,
+                    projects: vec![index],
+                    implicit: true,
+                    board: None,
+                })
+            }
         }
         index
     }
@@ -123,6 +132,23 @@ impl ProjectTree {
             return Err(format!("There is already a workspace named '{name}'"));
         }
         Ok(name.to_string())
+    }
+
+    /// `base`, or `base 2`, `base 3`... if a workspace already uses it, so
+    /// names always identify one workspace.
+    fn unique_name(&self, base: &str) -> String {
+        let taken = |name: &str| {
+            self.workspaces
+                .iter()
+                .any(|w| w.name.eq_ignore_ascii_case(name))
+        };
+        if !taken(base) {
+            return base.to_string();
+        }
+        (2..)
+            .map(|n| format!("{base} {n}"))
+            .find(|name| !taken(name))
+            .expect("unbounded range")
     }
 
     /// Appends an empty workspace and returns its index.
@@ -295,6 +321,8 @@ mod tests {
         assert_eq!(tree.workspaces.len(), 2);
         assert!(tree.workspaces[0].projects.is_empty());
         assert!(tree.workspaces[1].implicit);
+        // Names stay unique: saving the implicit one never hits the user's.
+        assert_eq!(tree.workspaces[1].name, "Local 2");
     }
 
     #[test]
@@ -350,6 +378,10 @@ b", None
 
         assert!(tree.remove_project(0, 0));
         assert!(!tree.remove_project(0, 0));
+        // A removed project is not found again by its directory.
+        let mut other = tree.clone();
+        let again = other.project_for_dir(&dir.join("a"));
+        assert_ne!(again, 0);
         assert_eq!(tree.workspaces[0].projects, vec![1]);
         assert_eq!(tree.projects[1].name, "other");
         assert_eq!(tree.workspace_of(0), None);

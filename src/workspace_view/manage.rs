@@ -33,7 +33,12 @@ pub(super) struct NameEditor {
 }
 
 impl WorkspaceView {
-    pub(super) fn open_editor(&mut self, target: EditTarget, cx: &mut Context<Self>) {
+    pub(super) fn open_editor(
+        &mut self,
+        target: EditTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let text = match target {
             EditTarget::NewWorkspace => "",
             EditTarget::Rename(w) => self.tree.workspaces[w].name.as_str(),
@@ -43,6 +48,16 @@ impl WorkspaceView {
             input: NameInput::new(text),
             error: None,
         });
+        // Without focus the terminal gets no text input; keys still reach
+        // the root capture handler, which feeds the field.
+        window.blur();
+        cx.notify();
+    }
+
+    /// Closes the name field and gives the keyboard back to the terminal.
+    pub(super) fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor = None;
+        self.focus_active(window, cx);
         cx.notify();
     }
 
@@ -67,7 +82,7 @@ impl WorkspaceView {
             .handle(&keystroke.key, keystroke.key_char.as_deref(), mods)
         {
             InputAction::Commit => self.commit_editor(window, cx),
-            InputAction::Cancel => self.editor = None,
+            InputAction::Cancel => self.close_editor(window, cx),
             InputAction::Changed => editor.error = None,
             InputAction::Paste => {
                 if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
@@ -96,7 +111,7 @@ impl WorkspaceView {
             }
         };
         let target = editor.target;
-        self.editor = None;
+        self.close_editor(window, cx);
         match target {
             EditTarget::NewWorkspace => {
                 let workspace = self.tree.add_workspace(name.clone());
@@ -112,12 +127,12 @@ impl WorkspaceView {
                 let from = std::mem::replace(&mut node.name, name.clone());
                 if node.implicit {
                     // Not in the file yet: renaming it is what saves it.
-                    node.implicit = false;
                     let projects = self.entries(workspace);
-                    self.persist(&Edit::AddProjects {
+                    let saved = self.persist(&Edit::AddProjects {
                         workspace: name,
                         projects,
                     });
+                    self.tree.workspaces[workspace].implicit = !saved;
                 } else {
                     self.persist(&Edit::RenameWorkspace { from, to: name });
                 }
@@ -143,28 +158,75 @@ impl WorkspaceView {
             let Ok(Ok(Some(paths))) = picked.await else {
                 return;
             };
-            let _ = this.update(cx, |this, cx| {
-                // The workspace may have been removed while the picker was open.
-                if let Some(index) = this.tree.workspaces.iter().position(|w| w.name == name) {
-                    this.add_folders(index, paths, cx);
-                }
-            });
+            let _ = this.update(cx, |this, cx| this.add_folders_to(&name, paths, cx));
         })
         .detach();
     }
 
-    /// Adds every existing directory in `paths` to `workspace`, detecting its
-    /// repository, saves the change and selects the last added project.
+    /// Adds folders to the workspace called `name` (it may have been renamed
+    /// or removed while a picker or a background task ran).
+    fn add_folders_to(&mut self, name: &str, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        match self.tree.workspaces.iter().position(|w| w.name == name) {
+            Some(index) => self.add_folders(index, paths, cx),
+            None => {
+                self.notice = Some(format!(
+                    "Folders not added: workspace '{name}' was renamed or removed"
+                ));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Adds every existing directory in `paths` to `workspace`. Checking the
+    /// folders and reading their git remotes touches the disk (maybe a slow
+    /// network drive), so it runs on a background thread.
     pub(super) fn add_folders(
         &mut self,
         workspace: usize,
         paths: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) {
+        let name = self.tree.workspaces[workspace].name.clone();
+        cx.spawn(async move |this, cx| {
+            let folders = cx
+                .background_spawn(async move {
+                    paths
+                        .into_iter()
+                        .filter(|p| p.is_dir())
+                        .map(|p| {
+                            let repo = detect_repo(&p);
+                            (p, repo)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match this.tree.workspaces.iter().position(|w| w.name == name) {
+                    Some(index) => this.add_detected(index, folders, cx),
+                    None => {
+                        this.notice = Some(format!(
+                            "Folders not added: workspace '{name}' was renamed or removed"
+                        ));
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Adds checked folders (with their detected repository) to `workspace`,
+    /// saves the change and selects the last added project.
+    fn add_detected(
+        &mut self,
+        workspace: usize,
+        folders: Vec<(PathBuf, Option<String>)>,
+        cx: &mut Context<Self>,
+    ) {
         let mut added = Vec::new();
         let mut last = None;
-        for path in paths.into_iter().filter(|p| p.is_dir()) {
-            let node = project_node(&path, detect_repo(&path));
+        for (path, repo) in folders {
+            let node = project_node(&path, repo);
             let (index, is_new) = self.tree.add_project(workspace, node);
             last = Some(index);
             if is_new {
@@ -172,9 +234,9 @@ impl WorkspaceView {
             }
         }
         if !added.is_empty() {
-            let projects = if self.tree.workspaces[workspace].implicit {
+            let implicit = self.tree.workspaces[workspace].implicit;
+            let projects = if implicit {
                 // Saving the implicit workspace writes all its projects.
-                self.tree.workspaces[workspace].implicit = false;
                 self.entries(workspace)
             } else {
                 added
@@ -186,10 +248,13 @@ impl WorkspaceView {
                     .collect()
             };
             let name = self.tree.workspaces[workspace].name.clone();
-            self.persist(&Edit::AddProjects {
+            let saved = self.persist(&Edit::AddProjects {
                 workspace: name,
                 projects,
             });
+            if implicit && saved {
+                self.tree.workspaces[workspace].implicit = false;
+            }
             // New repositories change what the board lists.
             self.boards.remove(&workspace);
         }
@@ -275,14 +340,15 @@ impl WorkspaceView {
     }
 
     /// Saves `edit` to the config file; on failure the change stays for this
-    /// run and the sidebar says why.
-    fn persist(&mut self, edit: &Edit) {
+    /// run and the sidebar says why. Returns whether it was saved.
+    fn persist(&mut self, edit: &Edit) -> bool {
         self.notice = match &self.config_path {
             None => Some("Changes are not saved: no config directory is known".into()),
             Some(path) => config_edit::save(path, edit, self.home.as_deref())
                 .err()
                 .map(|err| format!("Not saved to the config file: {err}")),
         };
+        self.notice.is_none()
     }
 
     /// The inline name field (also shows why a name was refused).

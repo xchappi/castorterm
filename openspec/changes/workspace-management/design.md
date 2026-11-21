@@ -22,9 +22,20 @@ to workspaces and projects by index.
 - **Repo detection.** Read `<dir>/.git/config` (following a `gitdir:` file for worktrees), take
   `remote "origin"` `url`, and keep the last two path segments without `.git` for
   `https://host/owner/repo(.git)`, `ssh://git@host/owner/repo.git` and `git@host:owner/repo.git`.
-  The result must pass the repo allow list; otherwise no repo is set.
+  The result must pass the repo allow list; otherwise no repo is set. The host is ignored on
+  purpose: trackers identify repositories as `owner/repo`, and the user can edit `repo` if two hosts
+  collide. Only local paths are followed (`gitdir:`, `commondir`, no symlinked `.git`), files are
+  read up to 1 MiB, and git is never run: the folder may be an untrusted clone, and opening a UNC
+  path would send the user's Windows credentials to that host.
+- **Off the UI thread.** Checking dropped or picked folders and reading their remotes runs in the
+  background, like the file explorer, so a slow network drive never freezes the window.
+- **Names identify workspaces.** The config loader skips duplicate workspace names and the
+  implicit workspace takes a free name (`Local 2`...), so saving by name is unambiguous. Removals
+  in the file affect only the first match.
+- **Folders that are symlinks or junctions** are accepted like any directory: the user chose them.
 - **Text input.** A minimal inline field handled in the existing key capture (characters,
-  Backspace, Enter, Escape); while it is active keys do not reach the terminal. GPUI has no
+  Backspace, Enter, Escape, Ctrl+V); while it is open the terminal loses focus, so neither key
+  events nor text input reach it. GPUI has no
   built-in text input, and IME support is not needed for names.
 - **Picker and drop.** `cx.prompt_for_paths` (directories, multiple) and `on_drop::<ExternalPaths>`
   on the sidebar; only existing directories are added.

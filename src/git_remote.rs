@@ -1,14 +1,23 @@
 //! Detects a project's `owner/repo` from its git `origin` remote, so new
 //! projects get a `repo` for the Quests board without extra setup.
 
-use std::path::{Path, PathBuf};
+use std::io::Read as _;
+use std::path::{Component, Path, PathBuf, Prefix};
 
 use crate::config::valid_repo;
 
+/// Git files read here are small; anything bigger is not a git file.
+const MAX_GIT_FILE: u64 = 1 << 20;
+
 /// `owner/repo` of the `origin` remote of the repository at `dir`, if any.
 /// Reads git's files directly: no `git` process is started.
+///
+/// The folder may be an untrusted clone, so redirections (`gitdir:`,
+/// `commondir`, symlinks) are only followed to local paths: opening a UNC
+/// path such as `\host\share` makes Windows send the user's credentials
+/// to that host.
 pub fn detect_repo(dir: &Path) -> Option<String> {
-    let config = std::fs::read_to_string(git_dir(dir)?.join("config")).ok()?;
+    let config = read_local(&git_dir(dir)?.join("config"))?;
     let url = origin_url(&config)?;
     repo_from_url(&url).filter(|r| valid_repo(r))
 }
@@ -18,22 +27,52 @@ pub fn detect_repo(dir: &Path) -> Option<String> {
 /// main repository's config, found through `commondir`.
 fn git_dir(dir: &Path) -> Option<PathBuf> {
     let dot_git = dir.join(".git");
-    let git_dir = if dot_git.is_dir() {
+    let meta = std::fs::symlink_metadata(&dot_git).ok()?;
+    let git_dir = if meta.is_dir() {
         dot_git
-    } else {
-        let text = std::fs::read_to_string(&dot_git).ok()?;
+    } else if meta.is_file() {
+        let text = read_local(&dot_git)?;
         let target = text.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim();
-        let target = Path::new(target);
-        if target.is_absolute() {
-            target.to_path_buf()
-        } else {
-            dir.join(target)
-        }
+        local(dir.join(target))?
+    } else {
+        // A symlinked .git could point anywhere.
+        return None;
     };
-    match std::fs::read_to_string(git_dir.join("commondir")) {
-        Ok(common) => Some(git_dir.join(common.trim())),
-        Err(_) => Some(git_dir),
+    match read_local(&git_dir.join("commondir")) {
+        Some(common) => local(git_dir.join(common.trim())),
+        None => Some(git_dir),
     }
+}
+
+/// `path` if it is on a local drive (not UNC, not a device path).
+fn local(path: PathBuf) -> Option<PathBuf> {
+    let text = path.to_string_lossy();
+    if text.starts_with("\\\\") || text.starts_with("//") {
+        return None;
+    }
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(_) | Prefix::VerbatimDisk(_) => Some(path),
+            _ => None,
+        },
+        _ => Some(path),
+    }
+}
+
+/// Contents of a regular local file of at most [`MAX_GIT_FILE`] bytes,
+/// without following symlinks.
+fn read_local(path: &Path) -> Option<String> {
+    let path = local(path.to_path_buf())?;
+    if !std::fs::symlink_metadata(&path).ok()?.is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    std::fs::File::open(&path)
+        .ok()?
+        .take(MAX_GIT_FILE)
+        .read_to_string(&mut text)
+        .ok()?;
+    Some(text)
 }
 
 /// `url` of `[remote "origin"]` in a git config file.
@@ -161,6 +200,25 @@ mod tests {
 
         std::fs::remove_dir_all(main).unwrap();
         std::fs::remove_dir_all(wt).unwrap();
+    }
+
+    #[test]
+    fn remote_paths_are_never_followed() {
+        assert_eq!(local(PathBuf::from(r"\\127.0.0.1\share\x")), None);
+        assert_eq!(local(PathBuf::from("//127.0.0.1/share/x")), None);
+        assert_eq!(local(PathBuf::from(r"\\?\UNC\host\share")), None);
+        assert!(local(PathBuf::from("relative/x")).is_some());
+
+        let dir = temp_dir("unc");
+        std::fs::write(dir.join(".git"), "gitdir: \\\\127.0.0.1\\share\\repo\n").unwrap();
+        assert_eq!(git_dir(&dir), None);
+        std::fs::remove_file(dir.join(".git")).unwrap();
+        // A local gitdir whose commondir points to the network.
+        std::fs::create_dir_all(dir.join("gd")).unwrap();
+        std::fs::write(dir.join(".git"), "gitdir: gd\n").unwrap();
+        std::fs::write(dir.join("gd/commondir"), "//127.0.0.1/share\n").unwrap();
+        assert_eq!(git_dir(&dir), None);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

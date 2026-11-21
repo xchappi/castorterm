@@ -344,6 +344,17 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
                 .push("Workspace skipped: name must be a non-empty single line".into());
             continue;
         }
+        // Names identify workspaces when the window saves changes.
+        if settings
+            .workspaces
+            .iter()
+            .any(|w| w.name.eq_ignore_ascii_case(workspace_name))
+        {
+            settings.messages.push(format!(
+                "Workspace '{workspace_name}' skipped: another workspace has the same name"
+            ));
+            continue;
+        }
         let board = workspace.board.and_then(|board| {
             parse_board(board, workspace_name, &providers, &mut settings.messages)
         });
@@ -739,6 +750,17 @@ mod tests {
         ] {
             assert!(!valid_repo(bad), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn duplicate_workspace_names_are_skipped() {
+        let s = parse(
+            "[[workspaces]]\nname = \"W\"\n[[workspaces]]\nname = \"w\"\n",
+            None,
+        )
+        .unwrap();
+        assert_eq!(s.workspaces.len(), 1);
+        assert_eq!(s.messages.len(), 1, "{:?}", s.messages);
     }
 
     #[test]
