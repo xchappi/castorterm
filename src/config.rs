@@ -719,6 +719,25 @@ mod tests {
     }
 
     #[test]
+    fn zoom_and_collapsed_are_read() {
+        let s = parse(
+            "[ui]\nzoom = 9.0\n[[workspaces]]\nname = \"W\"\ncollapsed = true\n",
+            None,
+        )
+        .unwrap();
+        assert_eq!(s.zoom, crate::theme::MAX_ZOOM);
+        assert!(s.workspaces[0].collapsed);
+        assert_eq!(parse("[ui]\nzoom = 1.26\n", None).unwrap().zoom, 1.3);
+        assert_eq!(parse("", None).unwrap().zoom, 1.0);
+        assert!(
+            !parse("[[workspaces]]\nname = \"W\"\n", None)
+                .unwrap()
+                .workspaces[0]
+                .collapsed
+        );
+    }
+
+    #[test]
     fn scanlines_default_on_and_can_be_disabled() {
         assert!(parse("", None).unwrap().scanlines);
         assert!(!parse("[ui]\nscanlines = false", None).unwrap().scanlines);

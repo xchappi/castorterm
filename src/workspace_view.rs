@@ -52,6 +52,11 @@ const INITIAL_GRID: GridSize = GridSize {
     rows: 30,
 };
 
+/// Zoom changes are saved this long after the last one.
+const ZOOM_SAVE_DELAY: Duration = Duration::from_millis(500);
+/// Ctrl + wheel distance (pixels) per zoom step.
+const WHEEL_PER_ZOOM_STEP: f32 = 40.0;
+
 /// How often agent status files are read.
 const STATUS_TICK: Duration = Duration::from_secs(1);
 
@@ -134,6 +139,12 @@ pub struct WorkspaceView {
     palette: Option<Palette>,
     /// Start agents on tasks in a git worktree of their own.
     task_worktree: bool,
+    /// Ctrl + wheel distance not yet turned into a zoom step.
+    wheel_acc: f32,
+    /// Pending save of the zoom (replaced, so only the last one runs).
+    zoom_save: Option<gpui::Task<()>>,
+    /// Window width at the last frame, to size the side columns.
+    viewport_width: f32,
     /// Worktrees being created, so a double click starts only one.
     pending_worktrees: std::collections::HashSet<PathBuf>,
     /// Folder of the per-session status files.
@@ -225,6 +236,9 @@ impl WorkspaceView {
             palette: None,
             focus: cx.focus_handle(),
             task_worktree: false,
+            wheel_acc: 0.0,
+            viewport_width: f32::INFINITY,
+            zoom_save: None,
             pending_worktrees: Default::default(),
             status_dir: None,
             next_status_key: 0,
@@ -395,6 +409,12 @@ impl WorkspaceView {
 
     fn activate(&mut self, id: SessionId, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.activate(id) {
+            // Show it: unfold its workspace for this run (not saved).
+            if let Some(project) = self.tabs.active().map(|t| t.project)
+                && let Some(w) = self.tree.workspace_of(project)
+            {
+                self.tree.workspaces[w].collapsed = false;
+            }
             self.select_active_project(cx);
             self.focus_active(window, cx);
             self.save_state();
@@ -494,8 +514,26 @@ impl WorkspaceView {
         for tab in self.tabs.iter() {
             tab.handle.view.update(cx, |_, cx| cx.notify());
         }
-        self.persist_quietly(&crate::config_edit::Edit::SetZoom(next));
+        // Save once the user stops zooming: a wheel gesture makes many steps.
+        self.zoom_save = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(ZOOM_SAVE_DELAY).await;
+            let _ = this.update(cx, |this, _| this.save_zoom());
+        }));
         cx.notify();
+    }
+
+    /// Width of a side column: grows with the zoom, but never takes more than
+    /// `max_share` of the window, so the terminal keeps most of the space.
+    fn column_width(&self, base: f32, max_share: f32) -> gpui::Pixels {
+        let zoomed = base * crate::theme::zoom();
+        let cap = (self.viewport_width * max_share).max(base);
+        px(zoomed.min(cap).round())
+    }
+
+    /// Writes the current zoom to the config file (pending save done).
+    fn save_zoom(&mut self) {
+        self.zoom_save = None;
+        self.persist_quietly(&crate::config_edit::Edit::SetZoom(crate::theme::zoom()));
     }
 
     /// Folds or unfolds `workspace` in the sidebar and saves it.
@@ -949,7 +987,7 @@ impl WorkspaceView {
             .items_center()
             .justify_between()
             .w_full()
-            .h(px(HUD_HEIGHT - 2.0))
+            .h(ui(HUD_HEIGHT - 2.0))
             .px_4()
             .bg(linear_gradient(
                 90.0,
@@ -1117,7 +1155,7 @@ impl WorkspaceView {
                                     // The name wins over the branch when space is short.
                                     div()
                                         .flex_shrink_0()
-                                        .max_w(px(130.0))
+                                        .max_w(ui(130.0))
                                         .overflow_hidden()
                                         .text_ellipsis()
                                         .whitespace_nowrap()
@@ -1315,7 +1353,7 @@ impl WorkspaceView {
         div()
             .id("sidebar")
             .flex_none()
-            .w(ui(SIDEBAR_WIDTH))
+            .w(self.column_width(SIDEBAR_WIDTH, 0.24))
             .h_full()
             .flex()
             .flex_col()
@@ -1362,7 +1400,7 @@ impl WorkspaceView {
                 div()
                     .id("sidebar-drop")
                     .flex_1()
-                    .min_h(px(40.0))
+                    .min_h(ui(40.0))
                     .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                         if let Some(workspace) = this.selected_workspace() {
                             this.add_folders(workspace, paths.paths().to_vec(), cx);
@@ -1453,7 +1491,7 @@ impl WorkspaceView {
 
         div()
             .flex_none()
-            .w(ui(EXPLORER_WIDTH))
+            .w(self.column_width(EXPLORER_WIDTH, 0.28))
             .h_full()
             .flex()
             .flex_col()
@@ -1931,7 +1969,7 @@ impl WorkspaceView {
             .items_end()
             .gap_1()
             .w_full()
-            .h(px(TAB_BAR_HEIGHT))
+            .h(ui(TAB_BAR_HEIGHT))
             .px_2()
             .pt_1()
             .overflow_x_scroll()
@@ -1969,8 +2007,8 @@ fn tree_row(id: ElementId, depth: usize, marker: &'static str) -> Stateful<Div> 
         .flex()
         .items_center()
         .gap_1()
-        .h(px(22.0))
-        .pl(px(8.0 + depth as f32 * TREE_INDENT))
+        .h(ui(22.0))
+        .pl(ui(8.0 + depth as f32 * TREE_INDENT))
         .pr_2()
         .whitespace_nowrap()
         .overflow_hidden()
@@ -1979,7 +2017,7 @@ fn tree_row(id: ElementId, depth: usize, marker: &'static str) -> Stateful<Div> 
         .child(
             div()
                 .flex_none()
-                .w(px(12.0))
+                .w(ui(12.0))
                 .text_color(rgb(MUTED))
                 .child(marker),
         )
@@ -2043,6 +2081,15 @@ fn launcher_button(id: impl Into<ElementId>, text: String, color: u32) -> Statef
         .child(SharedString::from(text))
 }
 
+/// Whole zoom steps in `distance` (pixels) and what is left over.
+fn wheel_steps(distance: f32, per_step: f32) -> (i32, f32) {
+    if !distance.is_finite() {
+        return (0, 0.0);
+    }
+    let steps = (distance / per_step).trunc();
+    (steps as i32, distance - steps * per_step)
+}
+
 /// Saved form of a window's bounds; full screen is restored as maximized.
 fn geometry(bounds: WindowBounds) -> SavedWindow {
     let rect = bounds.get_bounds();
@@ -2092,6 +2139,9 @@ impl Drop for WorkspaceView {
     fn drop(&mut self) {
         // The last geometry (moves and resizes are not written as they happen).
         self.save_state();
+        if self.zoom_save.is_some() {
+            self.save_zoom();
+        }
         for tab in self.tabs.iter() {
             if let Some(file) = &tab.handle.status_file {
                 let _ = std::fs::remove_file(file);
@@ -2105,6 +2155,7 @@ impl Render for WorkspaceView {
         if std::mem::take(&mut self.attention_pending) && !window.is_window_active() {
             crate::attention::request(window);
         }
+        self.viewport_width = window.viewport_size().width.into();
         let title = self.window_title();
         if title != self.shown_title {
             window.set_window_title(&title);
@@ -2160,13 +2211,19 @@ impl Render for WorkspaceView {
             // Ctrl + wheel zooms, anywhere in the window.
             .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
                 if !event.modifiers.control {
+                    this.wheel_acc = 0.0;
                     return;
                 }
-                let dy = event.delta.pixel_delta(px(16.0)).y;
-                if dy > px(0.0) {
-                    this.change_zoom(Some(crate::theme::ZOOM_STEP), cx);
-                } else if dy < px(0.0) {
-                    this.change_zoom(Some(-crate::theme::ZOOM_STEP), cx);
+                // Touchpads send many small events per gesture: one step per
+                // WHEEL_PER_ZOOM_STEP pixels, not one per event.
+                if matches!(event.touch_phase, gpui::TouchPhase::Started) {
+                    this.wheel_acc = 0.0;
+                }
+                let dy: f32 = event.delta.pixel_delta(px(16.0)).y.into();
+                let (steps, rest) = wheel_steps(this.wheel_acc + dy, WHEEL_PER_ZOOM_STEP);
+                this.wheel_acc = rest;
+                if steps != 0 {
+                    this.change_zoom(Some(crate::theme::ZOOM_STEP * steps as f32), cx);
                 }
             }))
             .relative()
@@ -2198,7 +2255,15 @@ impl Render for WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use super::{geometry, plural};
+    use super::{geometry, plural, wheel_steps};
+
+    #[test]
+    fn wheel_distance_becomes_whole_steps() {
+        assert_eq!(wheel_steps(10.0, 40.0), (0, 10.0));
+        assert_eq!(wheel_steps(95.0, 40.0), (2, 15.0));
+        assert_eq!(wheel_steps(-50.0, 40.0), (-1, -10.0));
+        assert_eq!(wheel_steps(f32::NAN, 40.0), (0, 0.0));
+    }
     use gpui::{Bounds, WindowBounds, point, px, size};
 
     #[test]

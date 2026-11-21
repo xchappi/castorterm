@@ -116,7 +116,7 @@ other agent can do the same from its own hooks or scripts.
 | `Ctrl+Shift+O` | Add folders to the selected workspace |
 | `Ctrl+Shift+P` | Command palette: open any agent in any project, go to a session, add folders |
 | `Ctrl+Shift+J` | Jump to the next agent waiting for you |
-| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Bigger / smaller / default text (also `Ctrl` + mouse wheel) |
+| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Bigger / smaller / default text (also `Ctrl` + mouse wheel). Like Windows Terminal, `Ctrl+-` no longer reaches the shell (readline's undo is also `Ctrl+_`) |
 
 castorterm exits when the last session closes.
 
