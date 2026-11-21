@@ -1,0 +1,89 @@
+# session-tabs Specification
+
+## Purpose
+Lets one castorterm window host many terminal sessions organised as Workspace -> Project ->
+Session, so the user can run different agents in different projects side by side and switch
+between them from a sidebar, a tab bar or the keyboard.
+
+## Requirements
+
+### Requirement: Multiple concurrent sessions
+The system SHALL allow several terminal sessions to be open at the same time in one window. Exactly
+one session is active and drawn in the terminal area; inactive sessions keep running and keep
+their content.
+
+#### Scenario: Background session keeps running
+- **WHEN** a long-running command is started in one session and the user activates another session
+- **THEN** the command keeps running and its output is visible when the first session is activated again
+
+### Requirement: Sidebar tree
+The system SHALL show a sidebar listing every workspace, under it every project, and under each
+project its open sessions. The active session SHALL be highlighted. Clicking a session SHALL make
+it the active session and give it keyboard focus.
+
+#### Scenario: Activate from the sidebar
+- **WHEN** the user clicks a session listed under a project
+- **THEN** that session becomes active, is drawn in the terminal area and receives keyboard input
+
+### Requirement: Agent launchers
+The system SHALL show, for each project, one launcher per configured agent preceded by a built-in
+"Shell" launcher. Activating a launcher SHALL start the default shell with the project path as
+working directory and, for agents, SHALL type the agent command followed by Enter into it. The new
+session SHALL become active. Sessions are labelled with the launcher name, with a numeric suffix
+when the project already has a session with that name.
+
+#### Scenario: Start Claude Code in a project
+- **WHEN** the config defines an agent `Claude Code` with command `claude` and the user activates its launcher on project `castorterm`
+- **THEN** a new session labelled `Claude Code` appears under `castorterm`, its shell runs in the project directory and `claude` is executed in it
+
+#### Scenario: Second shell in the same project
+- **WHEN** the project already has a session labelled `Shell` and the user starts another shell
+- **THEN** the new session is labelled `Shell 2`
+
+#### Scenario: Project directory missing
+- **WHEN** the user activates a launcher on a project whose path does not exist
+- **THEN** no session is created and an error naming the path is shown in the sidebar
+
+### Requirement: Tab bar
+The system SHALL show a tab bar above the terminal area with one tab per open session, labelled
+with the session and project names, highlighting the active one. Clicking a tab SHALL activate it
+and clicking its close button SHALL close that session.
+
+#### Scenario: Close from the tab bar
+- **WHEN** the user clicks the close button of a tab
+- **THEN** that session's shell is terminated and the tab disappears from the tab bar and the sidebar
+
+### Requirement: Keyboard shortcuts
+The system SHALL handle these shortcuts before forwarding keys to the terminal: Ctrl+Shift+T opens
+a new shell in the active session's project, Ctrl+Shift+W closes the active session, Ctrl+Tab
+activates the next session and Ctrl+Shift+Tab the previous one, wrapping around.
+
+#### Scenario: Cycle sessions
+- **WHEN** three sessions are open, the third is active and the user presses Ctrl+Tab
+- **THEN** the first session becomes active
+
+### Requirement: Closing sessions
+When a session closes (its shell exits or the user closes it) the system SHALL remove it, and if it
+was active SHALL activate the session to its right, or to its left if it was the last one. The
+system SHALL exit when the last session closes.
+
+#### Scenario: Last session exits
+- **WHEN** the only open session's shell exits
+- **THEN** castorterm exits
+
+#### Scenario: Close the active middle tab
+- **WHEN** three sessions are open, the second is active and it is closed
+- **THEN** the session that was third becomes active
+
+### Requirement: Initial session
+On launch the system SHALL open one shell session in the launch directory. If a configured project
+has that same directory as its path, the session SHALL belong to that project; otherwise it SHALL
+belong to a project named after the directory inside an implicit workspace called "Local".
+
+#### Scenario: Launch inside a configured project
+- **WHEN** castorterm is launched from the path of the configured project `castorterm`
+- **THEN** the initial session is listed under `castorterm`
+
+#### Scenario: Launch elsewhere
+- **WHEN** castorterm is launched from a directory that is not a configured project
+- **THEN** the initial session is listed under a project named after that directory in workspace `Local`

@@ -93,11 +93,28 @@ struct PtySize {
     cell_height: u16,
 }
 
+/// Owns the channel to the PTY event loop and stops the loop (closing the
+/// PTY and ending the shell) when the last handle goes away.
+struct LoopHandle(EventLoopSender);
+
+impl LoopHandle {
+    fn send(&self, msg: Msg) {
+        // Fails only if the event loop already stopped.
+        let _ = self.0.send(msg);
+    }
+}
+
+impl Drop for LoopHandle {
+    fn drop(&mut self) {
+        self.send(Msg::Shutdown);
+    }
+}
+
 /// Cheap-to-clone handle to a running session (UI thread only).
 #[derive(Clone)]
 pub struct Session {
     term: Arc<FairMutex<Term<Listener>>>,
-    sender: Rc<EventLoopSender>,
+    sender: Rc<LoopHandle>,
     size: Rc<Cell<PtySize>>,
 }
 
@@ -126,7 +143,9 @@ impl Session {
         )));
         let event_loop = EventLoop::new(term.clone(), listener, pty, false, false)
             .context("could not create the PTY event loop")?;
-        let sender = event_loop.channel();
+        // From here on, dropping `sender` (also on the error path below)
+        // stops the event loop and the shell.
+        let sender = LoopHandle(event_loop.channel());
         let reader = event_loop.spawn();
 
         // The event loop can stop on I/O errors without reporting a child
@@ -152,8 +171,13 @@ impl Session {
 
     /// Sends raw bytes to the shell.
     pub fn write(&self, bytes: Vec<u8>) {
-        // Fails only if the event loop is gone, i.e. the shell already exited.
-        let _ = self.sender.send(Msg::Input(bytes.into()));
+        self.sender.send(Msg::Input(bytes.into()));
+    }
+
+    /// Stops the PTY event loop, which closes the PTY and ends the shell
+    /// (ConPTY closes the pseudo console; on Unix the child gets SIGHUP).
+    pub fn shutdown(&self) {
+        self.sender.send(Msg::Shutdown);
     }
 
     /// Whether the terminal is in application cursor keys mode (DECCKM).
@@ -176,7 +200,7 @@ impl Session {
         if old.grid != grid {
             self.term.lock().resize(grid);
         }
-        let _ = self.sender.send(Msg::Resize(window_size(new)));
+        self.sender.send(Msg::Resize(window_size(new)));
     }
 }
 

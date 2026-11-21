@@ -8,9 +8,9 @@ use alacritty_terminal::vte::ansi::CursorShape;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{
-    App, Bounds, Context, ElementInputHandler, EntityInputHandler, FocusHandle, Focusable, Hsla,
-    KeyDownEvent, PaintQuad, Pixels, Point, Rgba, ShapedLine, SharedString, Task, TextRun,
-    UTF16Selection, Window, canvas, div, fill, font, point, prelude::*, px, size,
+    App, Bounds, Context, ElementInputHandler, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, Hsla, KeyDownEvent, PaintQuad, Pixels, Point, Rgba, ShapedLine, SharedString, Task,
+    TextRun, UTF16Selection, Window, canvas, div, fill, font, point, prelude::*, px, size,
 };
 
 use crate::keys::{KeyMode, Mods, encode_key};
@@ -28,16 +28,44 @@ const FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT: f32 = 1.3;
 const CURSOR_ALPHA: f32 = 0.6;
 
+/// Font used to draw a terminal.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TerminalStyle {
+    pub family: SharedString,
+    pub size: f32,
+}
+
+impl TerminalStyle {
+    /// Platform defaults for anything the config does not set.
+    pub fn new(family: Option<&str>, size: Option<f32>) -> Self {
+        Self {
+            family: family.unwrap_or(FONT_FAMILY).to_string().into(),
+            size: size.unwrap_or(FONT_SIZE),
+        }
+    }
+}
+
+/// Events a terminal reports to its owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalEvent {
+    /// The shell exited; the session is over.
+    Exited,
+}
+
 pub struct TerminalView {
     focus_handle: FocusHandle,
     session: Session,
+    style: TerminalStyle,
     _events: Task<()>,
 }
+
+impl EventEmitter<TerminalEvent> for TerminalView {}
 
 impl TerminalView {
     pub fn new(
         session: Session,
         events: UnboundedReceiver<SessionEvent>,
+        style: TerminalStyle,
         cx: &mut Context<Self>,
     ) -> Self {
         let events_task = cx.spawn(async move |this, cx| {
@@ -48,17 +76,23 @@ impl TerminalView {
                 while let Some(Some(event)) = events.next().now_or_never() {
                     batch.push(event);
                 }
-                let alive = this.update(cx, |view, cx| {
+                let exited = this.update(cx, |view, cx| {
+                    let mut exited = false;
                     for event in batch {
                         match event {
                             SessionEvent::Wakeup => {}
                             SessionEvent::PtyWrite(text) => view.session.write(text.into_bytes()),
-                            SessionEvent::Exit => cx.quit(),
+                            SessionEvent::Exit => exited = true,
                         }
                     }
+                    if exited {
+                        cx.emit(TerminalEvent::Exited);
+                    }
                     cx.notify();
+                    exited
                 });
-                if alive.is_err() {
+                // Stop once the view is gone or the session is over.
+                if exited.unwrap_or(true) {
                     break;
                 }
             }
@@ -67,8 +101,14 @@ impl TerminalView {
         Self {
             focus_handle: cx.focus_handle(),
             session,
+            style,
             _events: events_task,
         }
+    }
+
+    /// Terminates the shell. The view emits `Exited` once the PTY is closed.
+    pub fn shutdown(&self) {
+        self.session.shutdown();
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -99,6 +139,7 @@ impl Focusable for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let session = self.session.clone();
+        let style = self.style.clone();
         let focus_handle = self.focus_handle.clone();
         let entity = cx.entity();
 
@@ -109,7 +150,7 @@ impl Render for TerminalView {
             .on_key_down(cx.listener(Self::on_key_down))
             .child(
                 canvas(
-                    move |bounds, window, _cx| layout_frame(&session, bounds, window),
+                    move |bounds, window, _cx| layout_frame(&session, &style, bounds, window),
                     move |bounds, frame, window, cx| {
                         paint_frame(bounds, frame, window, cx);
                         window.handle_input(
@@ -132,10 +173,15 @@ struct Frame {
 }
 
 /// Measures the font, resizes the session to fit `bounds` and lays out the grid.
-fn layout_frame(session: &Session, bounds: Bounds<Pixels>, window: &mut Window) -> Frame {
+fn layout_frame(
+    session: &Session,
+    style: &TerminalStyle,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+) -> Frame {
     let theme = &DEFAULT_THEME;
-    let font_size = px(FONT_SIZE);
-    let regular = font(FONT_FAMILY);
+    let font_size = px(style.size);
+    let regular = font(style.family.clone());
     let bold = regular.clone().bold();
     let text_system = window.text_system().clone();
     let font_id = text_system.resolve_font(&regular);

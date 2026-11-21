@@ -1,0 +1,35 @@
+# castorterm configuration example.
+#
+# Location:
+#   Windows:      %APPDATA%\castorterm\config.toml
+#   macOS/Linux:  $XDG_CONFIG_HOME/castorterm/config.toml (default ~/.config/castorterm/config.toml)
+# Set CASTORTERM_CONFIG to use another file. Every section is optional.
+
+[font]
+family = "Cascadia Mono"
+size = 14
+
+# Agent launchers. Each one opens your shell in the project directory and
+# types `command` into it, so the shell stays open when the agent exits.
+# The command lands in your shell history: do not put API keys in it, use
+# environment variables instead.
+[[agents]]
+name = "Claude Code"
+command = "claude"
+
+[[agents]]
+name = "OpenCode"
+command = "opencode"
+
+# Workspaces group projects in the sidebar. Paths must be absolute; a
+# leading ~ is expanded to your home directory.
+[[workspaces]]
+name = "CastorLabs"
+
+[[workspaces.projects]]
+name = "castorterm"
+path = "~/src/castorterm"
+
+[[workspaces.projects]]
+name = "website"
+path = "~/src/website"
