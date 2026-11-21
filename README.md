@@ -89,13 +89,17 @@ your `PATH`):
   "hooks": {
     "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "castorterm --status working" }] }],
     "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "castorterm --status working" }] }],
-    "Notification": [{ "hooks": [{ "type": "command", "command": "castorterm --status waiting" }] }],
+    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "castorterm --status working" }] }],
+    "Notification": [{ "matcher": "permission_prompt", "hooks": [{ "type": "command", "command": "castorterm --status waiting" }] }],
     "Stop": [{ "hooks": [{ "type": "command", "command": "castorterm --status done" }] }]
   }
 }
 ```
 
-Any other agent can do the same from its own hooks or scripts.
+`waiting` is only set for permission prompts (Claude Code also notifies
+when it has been idle a while, which would mark finished sessions as
+waiting); `PostToolUse` sets `working` again once an approved tool runs. Any
+other agent can do the same from its own hooks or scripts.
 
 | Shortcut | Action |
 |---|---|

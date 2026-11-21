@@ -297,6 +297,10 @@ impl WorkspaceView {
             .status_dir
             .as_ref()
             .map(|dir| agent_status::file_for(dir, self.next_status_key));
+        if let Some(file) = &status_file {
+            // A recycled process id could match an old file.
+            let _ = std::fs::remove_file(file);
+        }
         let env = status_file
             .iter()
             .map(|f| (agent_status::ENV_VAR.to_string(), f.display().to_string()))
@@ -438,6 +442,8 @@ impl WorkspaceView {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.statuses_loading = false;
+                let mut statuses = statuses;
+                statuses.retain(|id, _| this.tabs.iter().any(|t| t.id == *id));
                 if this.statuses != statuses {
                     this.statuses = statuses;
                     cx.notify();
@@ -1926,6 +1932,18 @@ fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
 fn theme_bg() -> Rgba {
     let c = DEFAULT_THEME.background;
     rgb(u32::from_be_bytes([0, c.r, c.g, c.b]))
+}
+
+impl Drop for WorkspaceView {
+    /// Closing the window does not close the sessions one by one: remove
+    /// their status files here.
+    fn drop(&mut self) {
+        for tab in self.tabs.iter() {
+            if let Some(file) = &tab.handle.status_file {
+                let _ = std::fs::remove_file(file);
+            }
+        }
+    }
 }
 
 impl Render for WorkspaceView {

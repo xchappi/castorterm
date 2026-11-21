@@ -77,16 +77,37 @@ pub fn write_from_env(value: &str, env_value: Option<&std::ffi::OsStr>) -> Resul
         // Not inside castorterm: nothing to report.
         return Ok(());
     };
-    let named_ok = path.extension().is_some_and(|e| e == EXTENSION)
-        && path
-            .parent()
-            .and_then(Path::file_name)
-            .is_some_and(|d| d == DIR_NAME)
-        && path.is_absolute();
-    if !named_ok {
+    if !is_status_file(&path) {
         return Err(format!("{ENV_VAR} does not name a castorterm status file"));
     }
-    std::fs::write(&path, status.as_str()).map_err(|e| format!("could not write status: {e}"))
+    // Atomic: the window never reads a half-written (empty) file.
+    let tmp = path.with_extension(format!("{EXTENSION}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, status.as_str())
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("could not write status: {e}")
+        })
+}
+
+/// An absolute path `.../status/<pid>-<key>.status`, as made by [`file_for`].
+fn is_status_file(path: &Path) -> bool {
+    let in_status_dir = path
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|d| d == DIR_NAME);
+    let named = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_suffix(".status"))
+        .and_then(|stem| stem.split_once('-'))
+        .is_some_and(|(pid, key)| {
+            !pid.is_empty()
+                && !key.is_empty()
+                && pid.bytes().all(|b| b.is_ascii_digit())
+                && key.bytes().all(|b| b.is_ascii_digit())
+        });
+    path.is_absolute() && in_status_dir && named
 }
 
 /// Removes status files older than a day (left by crashed runs).
@@ -158,6 +179,9 @@ mod tests {
         assert!(!other.exists());
         let relative = PathBuf::from(DIR_NAME).join("1-1.status");
         assert!(write_from_env("done", Some(relative.as_os_str())).is_err());
+        let foreign = dir.join("notes.status");
+        assert!(write_from_env("done", Some(foreign.as_os_str())).is_err());
+        assert!(!foreign.exists());
         std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
     }
 
@@ -166,10 +190,20 @@ mod tests {
         let dir = temp_dir("stale");
         let fresh = file_for(&dir, 1);
         std::fs::write(&fresh, "done").unwrap();
+        let old = file_for(&dir, 2);
+        std::fs::write(&old, "done").unwrap();
+        let two_days = SystemTime::now() - 2 * STALE_AFTER;
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(two_days)
+            .unwrap();
         let unrelated = dir.join("keep.txt");
         std::fs::write(&unrelated, "x").unwrap();
         remove_stale(&dir);
         assert!(fresh.exists());
+        assert!(!old.exists());
         assert!(unrelated.exists());
         std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
     }

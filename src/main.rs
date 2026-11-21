@@ -44,15 +44,18 @@ fn main() {
     // `castorterm --status <working|waiting|done>`, run by agent hooks:
     // report the agent's status to the castorterm window it runs in.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let [flag, value] = args.as_slice()
-        && flag == "--status"
-    {
-        if let Err(err) =
-            agent_status::write_from_env(value, std::env::var_os(agent_status::ENV_VAR).as_deref())
-        {
+    if args.first().is_some_and(|a| a == "--status") {
+        let result = match args.get(1) {
+            Some(value) => agent_status::write_from_env(
+                value,
+                std::env::var_os(agent_status::ENV_VAR).as_deref(),
+            ),
+            None => Err("usage: castorterm --status <working|waiting|done>".into()),
+        };
+        if let Err(err) = result {
             eprintln!("castorterm: {err}");
         }
-        // Never fail the agent's hook.
+        // Never fail the agent's hook, never open a window from it.
         return;
     }
 

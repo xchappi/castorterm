@@ -119,7 +119,6 @@ pub struct Session {
 }
 
 impl Session {
-    /// Starts the default shell in `cwd` and the PTY reader thread.
     /// Starts the shell in `cwd` with the extra environment variables `env`.
     pub fn spawn(
         grid: GridSize,
