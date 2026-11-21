@@ -119,10 +119,11 @@ pub struct Session {
 }
 
 impl Session {
-    /// Starts the default shell in `cwd` and the PTY reader thread.
+    /// Starts the shell in `cwd` with the extra environment variables `env`.
     pub fn spawn(
         grid: GridSize,
         cwd: Option<PathBuf>,
+        env: Vec<(String, String)>,
         events: UnboundedSender<SessionEvent>,
     ) -> anyhow::Result<Self> {
         tty::setup_env();
@@ -131,7 +132,7 @@ impl Session {
             cell_width: 8,
             cell_height: 16,
         };
-        let pty = spawn_shell(window_size(size), cwd)?;
+        let pty = spawn_shell(window_size(size), cwd, env)?;
 
         let listener = Listener {
             events: events.clone(),
@@ -205,7 +206,11 @@ impl Session {
 }
 
 /// Starts the first shell candidate that resolves to an absolute path.
-fn spawn_shell(window_size: WindowSize, cwd: Option<PathBuf>) -> anyhow::Result<tty::Pty> {
+fn spawn_shell(
+    window_size: WindowSize,
+    cwd: Option<PathBuf>,
+    env: Vec<(String, String)>,
+) -> anyhow::Result<tty::Pty> {
     let path_var = std::env::var_os("PATH");
     let mut errors = Vec::new();
     for shell in default_shell_candidates() {
@@ -229,7 +234,7 @@ fn spawn_shell(window_size: WindowSize, cwd: Option<PathBuf>) -> anyhow::Result<
             shell: Some(tty::Shell::new(program, shell.args.clone())),
             working_directory: cwd.clone(),
             drain_on_exit: false,
-            env: Default::default(),
+            env: env.iter().cloned().collect(),
             ..Default::default()
         };
 
