@@ -139,6 +139,9 @@ pub struct WorkspaceView {
     /// Last status reported by the agent of each session.
     statuses: HashMap<SessionId, AgentStatus>,
     statuses_loading: bool,
+    /// An agent started waiting since the last frame: flash the taskbar if
+    /// the window is in the background.
+    attention_pending: bool,
     _status_timer: gpui::Task<()>,
     /// Focused while the name field or the palette owns the keyboard: keys
     /// then reach the root capture handler, and no terminal has focus.
@@ -221,6 +224,7 @@ impl WorkspaceView {
             next_status_key: 0,
             statuses: HashMap::new(),
             statuses_loading: false,
+            attention_pending: false,
             _status_timer: status_timer,
         };
         if let Some(node) = this.tree.projects.get(initial_project) {
@@ -444,6 +448,13 @@ impl WorkspaceView {
                 this.statuses_loading = false;
                 let mut statuses = statuses;
                 statuses.retain(|id, _| this.tabs.iter().any(|t| t.id == *id));
+                let newly_waiting = statuses.iter().any(|(id, s)| {
+                    *s == AgentStatus::Waiting
+                        && this.statuses.get(id) != Some(&AgentStatus::Waiting)
+                });
+                if newly_waiting {
+                    this.attention_pending = true;
+                }
                 if this.statuses != statuses {
                     this.statuses = statuses;
                     cx.notify();
@@ -451,6 +462,23 @@ impl WorkspaceView {
             });
         })
         .detach();
+    }
+
+    /// Activates the next session (after the active one, wrapping) whose
+    /// agent waits for the user.
+    fn next_waiting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ids: Vec<SessionId> = self.tabs.iter().map(|t| t.id).collect();
+        let start = self
+            .tabs
+            .active_id()
+            .and_then(|a| ids.iter().position(|&i| i == a))
+            .map_or(0, |p| p + 1);
+        let next = (0..ids.len())
+            .map(|k| ids[(start + k) % ids.len()])
+            .find(|id| self.statuses.get(id) == Some(&AgentStatus::Waiting));
+        if let Some(id) = next {
+            self.activate(id, window, cx);
+        }
     }
 
     /// Sessions whose agent is waiting for the user.
@@ -846,6 +874,7 @@ impl WorkspaceView {
                 }
             }
             Shortcut::Palette => self.open_palette(window, cx),
+            Shortcut::NextWaiting => self.next_waiting(window, cx),
         }
     }
 
@@ -1948,6 +1977,9 @@ impl Drop for WorkspaceView {
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.attention_pending) && !window.is_window_active() {
+            crate::attention::request(window);
+        }
         let title = self.window_title();
         if title != self.shown_title {
             window.set_window_title(&title);

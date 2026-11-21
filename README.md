@@ -96,6 +96,9 @@ your `PATH`):
 }
 ```
 
+When an agent starts waiting and the window is in the background, its
+taskbar button flashes until you come back.
+
 `waiting` is only set for permission prompts (Claude Code also notifies
 when it has been idle a while, which would mark finished sessions as
 waiting); `PostToolUse` sets `working` again once an approved tool runs. Any
@@ -109,6 +112,7 @@ other agent can do the same from its own hooks or scripts.
 | `Ctrl+Shift+E` | Show / hide the file explorer |
 | `Ctrl+Shift+O` | Add folders to the selected workspace |
 | `Ctrl+Shift+P` | Command palette: open any agent in any project, go to a session, add folders |
+| `Ctrl+Shift+J` | Jump to the next agent waiting for you |
 
 castorterm exits when the last session closes.
 

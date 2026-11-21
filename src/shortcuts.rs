@@ -13,6 +13,8 @@ pub enum Shortcut {
     AddFolder,
     /// Open the command palette.
     Palette,
+    /// Go to the next session whose agent waits for the user.
+    NextWaiting,
 }
 
 impl Shortcut {
@@ -24,7 +26,7 @@ impl Shortcut {
 }
 
 /// Maps a GPUI key name plus modifiers to a shortcut. Chosen to avoid keys
-/// that shells and TUIs use: Ctrl+Shift+T/W/E/O/P and Ctrl+(Shift+)Tab.
+/// that shells and TUIs use: Ctrl+Shift+T/W/E/O/P/J and Ctrl+(Shift+)Tab.
 pub fn match_shortcut(key: &str, mods: Mods) -> Option<Shortcut> {
     if !mods.ctrl || mods.alt {
         return None;
@@ -36,6 +38,7 @@ pub fn match_shortcut(key: &str, mods: Mods) -> Option<Shortcut> {
         ("e", true) => Some(Shortcut::ToggleFiles),
         ("o", true) => Some(Shortcut::AddFolder),
         ("p", true) => Some(Shortcut::Palette),
+        ("j", true) => Some(Shortcut::NextWaiting),
         ("tab", false) => Some(Shortcut::NextSession),
         ("tab", true) => Some(Shortcut::PrevSession),
         _ => None,
@@ -67,6 +70,7 @@ mod tests {
         assert_eq!(match_shortcut("o", CTRL), None);
         assert_eq!(match_shortcut("p", CTRL_SHIFT), Some(Shortcut::Palette));
         assert_eq!(match_shortcut("p", CTRL), None);
+        assert_eq!(match_shortcut("j", CTRL_SHIFT), Some(Shortcut::NextWaiting));
         assert_eq!(
             match_shortcut("w", CTRL_SHIFT),
             Some(Shortcut::CloseSession)
