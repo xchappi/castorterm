@@ -15,4 +15,4 @@
 ## 3. Verification
 
 - [x] 3.1 Screenshots on Windows: chrome readable, agent launcher runs `claude` in the project, Ctrl+Shift+T leaves no stray character
-- [ ] 3.2 CI green on Windows, macOS and Linux
+- [x] 3.2 CI green on Windows, macOS and Linux
