@@ -148,6 +148,10 @@ pub struct Settings {
     pub scanlines: bool,
     /// Human readable warnings and errors for the sidebar.
     pub messages: Vec<String>,
+    /// Where workspace changes made from the UI are saved.
+    pub config_path: Option<PathBuf>,
+    /// Home directory, to expand `~` in project paths.
+    pub home: Option<PathBuf>,
 }
 
 impl Default for Settings {
@@ -159,6 +163,8 @@ impl Default for Settings {
             workspaces: Vec::new(),
             scanlines: true,
             messages: Vec::new(),
+            config_path: None,
+            home: None,
         }
     }
 }
@@ -216,9 +222,12 @@ pub fn config_path(env: &Env) -> Option<PathBuf> {
 /// in [`Settings::messages`] and defaults are used.
 pub fn load(env: &Env) -> Settings {
     let Some(path) = config_path(env) else {
-        return Settings::default();
+        return Settings {
+            home: env.home.clone(),
+            ..Settings::default()
+        };
     };
-    match std::fs::read_to_string(&path) {
+    let settings = match std::fs::read_to_string(&path) {
         Ok(text) => parse(&text, env.home.as_deref()).unwrap_or_else(|err| Settings {
             messages: vec![format!("Config {}: {err}", path.display())],
             ..Settings::default()
@@ -228,6 +237,11 @@ pub fn load(env: &Env) -> Settings {
             messages: vec![format!("Could not read config {}: {err}", path.display())],
             ..Settings::default()
         },
+    };
+    Settings {
+        config_path: Some(path),
+        home: env.home.clone(),
+        ..settings
     }
 }
 
@@ -330,6 +344,17 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
                 .push("Workspace skipped: name must be a non-empty single line".into());
             continue;
         }
+        // Names identify workspaces when the window saves changes.
+        if settings
+            .workspaces
+            .iter()
+            .any(|w| w.name.eq_ignore_ascii_case(workspace_name))
+        {
+            settings.messages.push(format!(
+                "Workspace '{workspace_name}' skipped: another workspace has the same name"
+            ));
+            continue;
+        }
         let board = workspace.board.and_then(|board| {
             parse_board(board, workspace_name, &providers, &mut settings.messages)
         });
@@ -420,7 +445,7 @@ fn parse_board(
 /// Allow list: ASCII letters, digits and `. _ - /`, not starting with `-`.
 /// Nothing a shell or `cmd.exe` interprets (a `.cmd` provider re-parses its
 /// arguments), and nothing a provider could take for a flag.
-fn valid_repo(repo: &str) -> bool {
+pub(crate) fn valid_repo(repo: &str) -> bool {
     !repo.is_empty()
         && !repo.starts_with('-')
         && repo
@@ -430,13 +455,13 @@ fn valid_repo(repo: &str) -> bool {
 
 /// Non-empty and free of control characters: commands are typed into the
 /// shell, so an embedded newline would run extra commands.
-fn valid_text(text: &str) -> bool {
+pub(crate) fn valid_text(text: &str) -> bool {
     !text.is_empty() && !text.chars().any(char::is_control)
 }
 
 /// Expands a leading `~` (alone or followed by a separator) to `home`.
 /// Returns `None` when `~` is used but the home directory is unknown.
-fn expand_home(path: &str, home: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn expand_home(path: &str, home: Option<&Path>) -> Option<PathBuf> {
     let rest = match path.strip_prefix('~') {
         None => return Some(PathBuf::from(path)),
         Some(rest) => rest,
@@ -728,6 +753,17 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_workspace_names_are_skipped() {
+        let s = parse(
+            "[[workspaces]]\nname = \"W\"\n[[workspaces]]\nname = \"w\"\n",
+            None,
+        )
+        .unwrap();
+        assert_eq!(s.workspaces.len(), 1);
+        assert_eq!(s.messages.len(), 1, "{:?}", s.messages);
+    }
+
+    #[test]
     fn example_config_is_valid() {
         let home = PathBuf::from(abs("/home/me", "C:/Users/me"));
         let s = parse(include_str!("../config.example.toml"), Some(&home)).unwrap();
@@ -742,10 +778,18 @@ mod tests {
 
     #[test]
     fn missing_file_is_silent_default() {
+        let path = std::env::temp_dir().join("castorterm-does-not-exist.toml");
         let env = Env {
-            config_override: Some(std::env::temp_dir().join("castorterm-does-not-exist.toml")),
+            config_override: Some(path.clone()),
             ..Env::default()
         };
-        assert_eq!(load(&env), Settings::default());
+        // Defaults, remembering where UI changes will be saved.
+        assert_eq!(
+            load(&env),
+            Settings {
+                config_path: Some(path),
+                ..Settings::default()
+            }
+        );
     }
 }

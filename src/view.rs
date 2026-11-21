@@ -1,6 +1,8 @@
 //! GPUI view that renders a terminal session and forwards input to it.
 
+use std::cell::Cell;
 use std::ops::Range;
+use std::rc::Rc;
 
 use alacritty_terminal::grid::Dimensions as _;
 use alacritty_terminal::term::cell::Flags;
@@ -51,6 +53,21 @@ impl TerminalStyle {
     }
 }
 
+/// Shared switch that stops every terminal from taking keyboard input, for
+/// as long as another input (a name field) owns the keyboard.
+#[derive(Clone, Debug, Default)]
+pub struct InputGate(Rc<Cell<bool>>);
+
+impl InputGate {
+    pub fn set_paused(&self, paused: bool) {
+        self.0.set(paused);
+    }
+
+    pub fn paused(&self) -> bool {
+        self.0.get()
+    }
+}
+
 /// Events a terminal reports to its owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerminalEvent {
@@ -62,6 +79,7 @@ pub struct TerminalView {
     focus_handle: FocusHandle,
     session: Session,
     style: TerminalStyle,
+    gate: InputGate,
     _events: Task<()>,
 }
 
@@ -72,6 +90,7 @@ impl TerminalView {
         session: Session,
         events: UnboundedReceiver<SessionEvent>,
         style: TerminalStyle,
+        gate: InputGate,
         cx: &mut Context<Self>,
     ) -> Self {
         let events_task = cx.spawn(async move |this, cx| {
@@ -108,6 +127,7 @@ impl TerminalView {
             focus_handle: cx.focus_handle(),
             session,
             style,
+            gate,
             _events: events_task,
         }
     }
@@ -123,6 +143,10 @@ impl TerminalView {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.gate.paused() {
+            cx.stop_propagation();
+            return;
+        }
         let keystroke = &event.keystroke;
         let mods = Mods {
             ctrl: keystroke.modifiers.control,
@@ -422,7 +446,7 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) {
-        if !text.is_empty() {
+        if !text.is_empty() && !self.gate.paused() {
             self.session.write(text.as_bytes().to_vec());
         }
     }

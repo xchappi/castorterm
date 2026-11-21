@@ -6,8 +6,11 @@
 
 mod board;
 mod config;
+mod config_edit;
 mod files;
+mod git_remote;
 mod keys;
+mod name_input;
 mod palette;
 mod provider;
 mod session;

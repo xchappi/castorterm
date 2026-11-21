@@ -58,7 +58,13 @@ impl ProjectTree {
     /// Project whose path is `dir`; if none, adds a project named after the
     /// directory to the implicit "Local" workspace. Returns its index.
     pub fn project_for_dir(&mut self, dir: &Path) -> usize {
-        if let Some(index) = self.projects.iter().position(|p| same_dir(&p.path, dir)) {
+        // Only projects still in a workspace (removed ones stay as tombstones).
+        let listed = self
+            .workspaces
+            .iter()
+            .flat_map(|w| w.projects.iter().copied())
+            .find(|&p| same_dir(&self.projects[p].path, dir));
+        if let Some(index) = listed {
             return index;
         }
         let name = dir
@@ -73,14 +79,130 @@ impl ProjectTree {
         });
         match self.workspaces.iter_mut().find(|w| w.implicit) {
             Some(local) => local.projects.push(index),
-            None => self.workspaces.push(WorkspaceNode {
-                name: LOCAL_WORKSPACE.into(),
-                projects: vec![index],
-                implicit: true,
-                board: None,
-            }),
+            None => {
+                let name = self.unique_name(LOCAL_WORKSPACE);
+                self.workspaces.push(WorkspaceNode {
+                    name,
+                    projects: vec![index],
+                    implicit: true,
+                    board: None,
+                })
+            }
         }
         index
+    }
+}
+
+/// Longest workspace name accepted from the UI.
+pub const MAX_WORKSPACE_NAME: usize = 60;
+
+impl ProjectTree {
+    /// Workspace that lists `project`.
+    pub fn workspace_of(&self, project: usize) -> Option<usize> {
+        self.workspaces
+            .iter()
+            .position(|w| w.projects.contains(&project))
+    }
+
+    /// Trimmed `name` if it can name a new workspace (or rename `except`):
+    /// single line, not empty, not too long and not used by another one.
+    pub fn check_workspace_name(
+        &self,
+        name: &str,
+        except: Option<usize>,
+    ) -> Result<String, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("The workspace name cannot be empty".into());
+        }
+        if name.chars().any(char::is_control) {
+            return Err("The workspace name must be a single line".into());
+        }
+        if name.chars().count() > MAX_WORKSPACE_NAME {
+            return Err(format!(
+                "The workspace name can have at most {MAX_WORKSPACE_NAME} characters"
+            ));
+        }
+        let taken = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .any(|(i, w)| Some(i) != except && w.name.eq_ignore_ascii_case(name));
+        if taken {
+            return Err(format!("There is already a workspace named '{name}'"));
+        }
+        Ok(name.to_string())
+    }
+
+    /// `base`, or `base 2`, `base 3`... if a workspace already uses it, so
+    /// names always identify one workspace.
+    fn unique_name(&self, base: &str) -> String {
+        let taken = |name: &str| {
+            self.workspaces
+                .iter()
+                .any(|w| w.name.eq_ignore_ascii_case(name))
+        };
+        if !taken(base) {
+            return base.to_string();
+        }
+        (2..)
+            .map(|n| format!("{base} {n}"))
+            .find(|name| !taken(name))
+            .expect("unbounded range")
+    }
+
+    /// Appends an empty workspace and returns its index.
+    pub fn add_workspace(&mut self, name: String) -> usize {
+        self.workspaces.push(WorkspaceNode {
+            name,
+            projects: Vec::new(),
+            implicit: false,
+            board: None,
+        });
+        self.workspaces.len() - 1
+    }
+
+    /// Adds `node` to `workspace` unless a project with the same directory
+    /// is already there. Returns the project index and whether it was added.
+    /// Project indices never change: new projects are appended.
+    pub fn add_project(&mut self, workspace: usize, node: ProjectNode) -> (usize, bool) {
+        if let Some(&existing) = self.workspaces[workspace]
+            .projects
+            .iter()
+            .find(|&&p| same_dir(&self.projects[p].path, &node.path))
+        {
+            return (existing, false);
+        }
+        let index = self.projects.len();
+        self.projects.push(node);
+        self.workspaces[workspace].projects.push(index);
+        (index, true)
+    }
+
+    /// Takes `project` out of `workspace`. The node stays in
+    /// [`ProjectTree::projects`] so other indices keep their meaning.
+    pub fn remove_project(&mut self, workspace: usize, project: usize) -> bool {
+        let list = &mut self.workspaces[workspace].projects;
+        let before = list.len();
+        list.retain(|&p| p != project);
+        list.len() != before
+    }
+
+    /// Removes `workspace`; later workspaces move down one index.
+    pub fn remove_workspace(&mut self, workspace: usize) -> WorkspaceNode {
+        self.workspaces.remove(workspace)
+    }
+}
+
+/// Project node for a folder added from the UI: named after the folder.
+pub fn project_node(dir: &Path, repo: Option<String>) -> ProjectNode {
+    ProjectNode {
+        name: dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| dir.display().to_string()),
+        path: dir.to_path_buf(),
+        repo,
     }
 }
 
@@ -199,6 +321,75 @@ mod tests {
         assert_eq!(tree.workspaces.len(), 2);
         assert!(tree.workspaces[0].projects.is_empty());
         assert!(tree.workspaces[1].implicit);
+        // Names stay unique: saving the implicit one never hits the user's.
+        assert_eq!(tree.workspaces[1].name, "Local 2");
+    }
+
+    #[test]
+    fn workspace_names_are_checked() {
+        let tree = config_tree(Path::new("/x"));
+        assert_eq!(tree.check_workspace_name("  New  ", None).unwrap(), "New");
+        assert!(tree.check_workspace_name(" ", None).is_err());
+        assert!(
+            tree.check_workspace_name(
+                "a
+b", None
+            )
+            .is_err()
+        );
+        assert!(
+            tree.check_workspace_name(&"x".repeat(MAX_WORKSPACE_NAME + 1), None)
+                .is_err()
+        );
+        assert!(
+            tree.check_workspace_name("castorlabs", None)
+                .unwrap_err()
+                .contains("already")
+        );
+        // Renaming a workspace to itself (other case) is fine.
+        assert_eq!(
+            tree.check_workspace_name("CASTORLABS", Some(0)).unwrap(),
+            "CASTORLABS"
+        );
+    }
+
+    #[test]
+    fn projects_are_added_once_and_removed_without_moving_indices() {
+        let dir = std::env::temp_dir();
+        let mut tree = config_tree(&dir.join("a"));
+        let w = tree.add_workspace("New".into());
+        assert_eq!(w, 2);
+        let (p, added) = tree.add_project(w, project_node(&dir, Some("o/r".into())));
+        assert!(added);
+        assert_eq!(p, 2);
+        assert_eq!(
+            tree.projects[p].name,
+            dir.file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(tree.workspace_of(p), Some(w));
+        // Same folder, other spelling: not added again.
+        let spelled = dir.join("..").join(dir.file_name().unwrap());
+        assert_eq!(
+            tree.add_project(w, project_node(&spelled, None)),
+            (p, false)
+        );
+        // The same folder may live in another workspace.
+        assert!(tree.add_project(1, project_node(&dir, None)).1);
+
+        assert!(tree.remove_project(0, 0));
+        assert!(!tree.remove_project(0, 0));
+        // A removed project is not found again by its directory.
+        let mut other = tree.clone();
+        let again = other.project_for_dir(&dir.join("a"));
+        assert_ne!(again, 0);
+        assert_eq!(tree.workspaces[0].projects, vec![1]);
+        assert_eq!(tree.projects[1].name, "other");
+        assert_eq!(tree.workspace_of(0), None);
+
+        let removed = tree.remove_workspace(0);
+        assert_eq!(removed.name, "CastorLabs");
+        assert_eq!(tree.workspaces[1].name, "New");
+        assert_eq!(tree.workspace_of(p), Some(1));
     }
 
     #[test]
