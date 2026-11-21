@@ -54,6 +54,8 @@ pub enum SessionEvent {
     PtyWrite(String),
     /// The shell exited.
     Exit,
+    /// The shell reported its working directory (OSC 7 / OSC 9;9).
+    Cwd(String),
 }
 
 /// Forwards terminal events to the UI thread.
@@ -133,6 +135,10 @@ impl Session {
             cell_height: 16,
         };
         let pty = spawn_shell(window_size(size), cwd, env)?;
+        let cwd_events = events.clone();
+        let pty = crate::pty_tap::TapPty::new(pty, move |dir| {
+            let _ = cwd_events.unbounded_send(SessionEvent::Cwd(dir));
+        });
 
         let listener = Listener {
             events: events.clone(),

@@ -56,6 +56,14 @@ Build your workspaces from the window, no config editing needed:
 
 Every change is saved to your config file, keeping your comments.
 
+Tabs and session rows show where each shell is when it leaves the project
+folder. castorterm reads it from the shell: OSC 7 (bash, zsh, fish,
+oh-my-posh) and, on Windows, a small PowerShell integration it adds after
+your profile (it wraps your `prompt` to report the location in the window
+title, the only channel ConPTY forwards). If a policy blocks PowerShell's
+`-EncodedCommand`, the shell still starts (showing the error) and only the
+directory label is missing.
+
 castorterm reopens the sessions you had open when you start it again (same
 projects, same agents, the same tab active), in a window of the same size
 and place. Agents with `resume_args` in the

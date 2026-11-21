@@ -69,10 +69,12 @@ impl InputGate {
 }
 
 /// Events a terminal reports to its owner.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalEvent {
     /// The shell exited; the session is over.
     Exited,
+    /// The shell's working directory changed.
+    Cwd(String),
 }
 
 pub struct TerminalView {
@@ -103,12 +105,18 @@ impl TerminalView {
                 }
                 let exited = this.update(cx, |view, cx| {
                     let mut exited = false;
+                    let mut cwd = None;
                     for event in batch {
                         match event {
                             SessionEvent::Wakeup => {}
                             SessionEvent::PtyWrite(text) => view.session.write(text.into_bytes()),
                             SessionEvent::Exit => exited = true,
+                            // Only the last one of a burst matters.
+                            SessionEvent::Cwd(dir) => cwd = Some(dir),
                         }
+                    }
+                    if let Some(dir) = cwd {
+                        cx.emit(TerminalEvent::Cwd(dir));
                     }
                     if exited {
                         cx.emit(TerminalEvent::Exited);

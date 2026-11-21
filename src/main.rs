@@ -16,6 +16,7 @@ mod keys;
 mod name_input;
 mod palette;
 mod provider;
+mod pty_tap;
 mod restore;
 mod session;
 mod shell;

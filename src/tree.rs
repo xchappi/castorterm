@@ -199,6 +199,43 @@ impl ProjectTree {
     }
 }
 
+/// Short label for a session's working directory, or `None` when it is the
+/// project root (nothing to add). Inside the project: the relative path
+/// (`src/view`); elsewhere: the last two components (`…/a/b`).
+pub fn cwd_label(project: &Path, cwd: &Path) -> Option<String> {
+    let unify = |p: &Path| {
+        let text = p.to_string_lossy().replace('\\', "/");
+        text.trim_end_matches('/').to_string()
+    };
+    let (root, dir) = (unify(project), unify(cwd));
+    // Windows paths compare ignoring ASCII case; never slice by a length
+    // computed on another spelling (lowercasing can change byte lengths).
+    let same = |a: &str, b: &str| {
+        if cfg!(windows) {
+            a.eq_ignore_ascii_case(b)
+        } else {
+            a == b
+        }
+    };
+    if same(&dir, &root) {
+        return None;
+    }
+    let inside = dir
+        .get(..root.len())
+        .filter(|head| same(head, &root))
+        .and_then(|_| dir.get(root.len()..))
+        .and_then(|rest| rest.strip_prefix('/'));
+    if let Some(rest) = inside {
+        return (!rest.is_empty()).then(|| rest.to_string());
+    }
+    let parts: Vec<&str> = dir.split('/').filter(|p| !p.is_empty()).collect();
+    match parts.as_slice() {
+        [] => None,
+        [_] | [_, _] => Some(dir.clone()),
+        [.., a, b] => Some(format!("…/{a}/{b}")),
+    }
+}
+
 /// Project node for a folder added from the UI: named after the folder.
 pub fn project_node(dir: &Path, repo: Option<String>) -> ProjectNode {
     ProjectNode {
@@ -335,6 +372,47 @@ mod tests {
         assert!(tree.workspaces[1].implicit);
         // Names stay unique: saving the implicit one never hits the user's.
         assert_eq!(tree.workspaces[1].name, "Local 2");
+    }
+
+    #[test]
+    fn cwd_labels() {
+        let root = Path::new("/src/app");
+        assert_eq!(cwd_label(root, Path::new("/src/app")), None);
+        assert_eq!(cwd_label(root, Path::new("/src/app/")), None);
+        assert_eq!(
+            cwd_label(root, Path::new("/src/app/src/view")).as_deref(),
+            Some("src/view")
+        );
+        assert_eq!(
+            cwd_label(root, Path::new("/src/apple")).as_deref(),
+            Some("/src/apple")
+        );
+        assert_eq!(cwd_label(root, Path::new("/tmp")).as_deref(), Some("/tmp"));
+        assert_eq!(cwd_label(root, Path::new("/")), None);
+        assert_eq!(
+            cwd_label(root, Path::new("/src/app/\u{130}deas")).as_deref(),
+            Some("\u{130}deas")
+        );
+        assert_eq!(
+            cwd_label(root, Path::new("/a/b/c/d")).as_deref(),
+            Some("…/c/d")
+        );
+        if cfg!(windows) {
+            let root = Path::new(r"D:\proyectos\castorterm");
+            assert_eq!(cwd_label(root, Path::new(r"d:\Proyectos\castorterm")), None);
+            assert_eq!(
+                cwd_label(root, Path::new(r"D:\proyectos\castorterm\src")).as_deref(),
+                Some("src")
+            );
+            // Characters whose lowercase form has another byte length never
+            // break the comparison (this used to panic).
+            let root = Path::new(r"C:\proj");
+            assert_eq!(
+                cwd_label(root, Path::new("C:\\proj\\\u{130}\u{130}\u{130}")).as_deref(),
+                Some("\u{130}\u{130}\u{130}")
+            );
+            assert!(cwd_label(Path::new("C:\\\u{130}x"), Path::new(r"C:\ix\y")).is_some());
+        }
     }
 
     #[test]

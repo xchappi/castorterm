@@ -19,15 +19,64 @@ impl ShellSpec {
     }
 }
 
+/// PowerShell script run after the profile: wraps the current `prompt`
+/// (oh-my-posh and others included) so that, after it runs, the window title
+/// reports the location to castorterm (see `pty_tap::TITLE_PREFIX`; ConPTY
+/// forwards titles but drops OSC 7).
+const POWERSHELL_INTEGRATION: &str = r#"if (-not (Get-Variable -Name __castortermPrompt -Scope Global -ErrorAction SilentlyContinue)) {
+    $global:__castortermPrompt = $function:prompt
+}
+function global:prompt {
+    $text = & $global:__castortermPrompt
+    $title = 'castorterm:cwd:' + $executionContext.SessionState.Path.CurrentLocation.ProviderPath
+    $Host.UI.RawUI.WindowTitle = $title
+    # Also as the last thing written, after any title the prompt sets itself.
+    "$text" + [char]27 + ']0;' + $title + [char]7
+}"#;
+
+/// `-EncodedCommand` value for the integration: base64 of UTF-16LE, so no
+/// quoting of the command line is involved.
+pub fn powershell_integration() -> String {
+    let bytes: Vec<u8> = POWERSHELL_INTEGRATION
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    base64(&bytes)
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = match chunk {
+            [a, b, c] => u32::from(*a) << 16 | u32::from(*b) << 8 | u32::from(*c),
+            [a, b] => u32::from(*a) << 16 | u32::from(*b) << 8,
+            [a] => u32::from(*a) << 16,
+            _ => unreachable!(),
+        };
+        for (i, shift) in [18, 12, 6, 0].into_iter().enumerate() {
+            if i <= chunk.len() {
+                out.push(TABLE[(n >> shift & 0x3f) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 /// Shells to try, in order, for the given platform.
 ///
-/// On Windows: PowerShell 7 (`pwsh`) first, then Windows PowerShell.
+/// On Windows: PowerShell 7 (`pwsh`) first, then Windows PowerShell, both
+/// with the location integration.
 /// Elsewhere: `$SHELL` if set and not empty, then `/bin/bash`.
 pub fn shell_candidates(is_windows: bool, shell_env: Option<&str>) -> Vec<ShellSpec> {
     if is_windows {
+        let script = powershell_integration();
+        let args = ["-NoLogo", "-NoExit", "-EncodedCommand", script.as_str()];
         return vec![
-            ShellSpec::new("pwsh.exe", &["-NoLogo"]),
-            ShellSpec::new("powershell.exe", &["-NoLogo"]),
+            ShellSpec::new("pwsh.exe", &args),
+            ShellSpec::new("powershell.exe", &args),
         ];
     }
 
@@ -83,6 +132,39 @@ pub fn quote_windows_program(program: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Test-only decoder for the encoder above.
+    fn decode_base64(text: &str) -> Vec<u8> {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let values: Vec<u32> = text
+            .bytes()
+            .filter(|&b| b != b'=')
+            .map(|b| TABLE.iter().position(|&t| t == b).unwrap() as u32)
+            .collect();
+        let mut out = Vec::new();
+        for chunk in values.chunks(4) {
+            let n = chunk
+                .iter()
+                .enumerate()
+                .fold(0, |acc, (i, v)| acc | v << (18 - 6 * i));
+            for k in 0..chunk.len().saturating_sub(1) {
+                out.push((n >> (16 - 8 * k)) as u8);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn base64_matches_known_values() {
+        assert_eq!(super::base64(b""), "");
+        assert_eq!(super::base64(b"f"), "Zg==");
+        assert_eq!(super::base64(b"fo"), "Zm8=");
+        assert_eq!(super::base64(b"foo"), "Zm9v");
+        assert_eq!(super::base64(b"foobar"), "Zm9vYmFy");
+        // UTF-16LE of "ls" is 6c 00 73 00.
+        assert_eq!(super::base64(&[0x6c, 0, 0x73, 0]), "bABzAA==");
+    }
+
     use super::*;
 
     #[test]
@@ -91,7 +173,18 @@ mod tests {
         assert_eq!(c.len(), 2);
         assert_eq!(c[0].program, "pwsh.exe");
         assert_eq!(c[1].program, "powershell.exe");
-        assert_eq!(c[0].args, vec!["-NoLogo".to_string()]);
+        assert_eq!(&c[0].args[..3], ["-NoLogo", "-NoExit", "-EncodedCommand"]);
+        assert_eq!(c[0].args[3], powershell_integration());
+        // The encoded script decodes back to the integration.
+        let decoded = decode_base64(&c[0].args[3]);
+        let utf16: Vec<u16> = decoded
+            .chunks(2)
+            .map(|p| u16::from_le_bytes([p[0], p[1]]))
+            .collect();
+        let script = String::from_utf16(&utf16).unwrap();
+        assert!(script.contains("castorterm:cwd:"));
+        assert!(script.contains("__castortermPrompt"));
+        assert_eq!(c[1].args, c[0].args);
     }
 
     #[test]
