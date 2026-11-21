@@ -18,7 +18,7 @@ open source, so it must not know about any specific tracker: trackers plug in th
 - **Quests panel**: the middle column gets two tabs, **Files** and **Quests**. Quests shows the
   selected workspace's tasks grouped by status (In progress, Review, Ready, Backlog, Done
   collapsed), with priority, id and title. The board is read-only: agents update the tracker
-  themselves (for CastorLabs, through the CastorTasks MCP).
+  themselves (for example through the tracker's MCP server).
 - **Start an agent on a task**: selecting a task shows its project, link and one button per agent
   with `task_args`. The button opens a session of that agent in the task's project with the
   prompt (e.g. `Work on task {id}: {title}`) passed as a quoted argument.
@@ -30,8 +30,7 @@ open source, so it must not know about any specific tracker: trackers plug in th
 
 - Writing to the tracker from castorterm (moving tasks, comments). The contract reserves room for
   it in a later version.
-- The CastorTasks provider itself: it lives in the CastorLabs infrastructure repository (CL-246),
-  not here.
+- Providers for private trackers: they live with their owners, not in this repository.
 - Task details beyond title/status/priority/project/link, filtering and search inside the panel,
   drag and drop.
 - Per-project config files inside repositories (`.castorterm.toml`).

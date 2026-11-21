@@ -49,11 +49,15 @@ repo = "owner/repo"                 # tasks whose `project` is this go here
 ```
 
 - Run directly, without a shell. Standard input is closed.
-- Working directory: the first project of the workspace.
+- Working directory: the directory that contains the provider executable,
+  never a project (projects may be untrusted clones, and Windows searches
+  the working directory for programs and DLLs). If your provider starts other
+  programs, resolve them to absolute paths too.
+- The whole process tree is killed when the run times out.
 - Environment: `CASTORTERM_PROVIDER_PROTOCOL=1`.
 - `command` is resolved to an absolute path searching only absolute `PATH`
-  entries (never the current directory). On Windows, a bare name also tries
-  `.exe`, `.cmd` and `.bat`.
+  entries (never the current directory). On Windows, a bare name tries
+  `.exe`, `.cmd` and `.bat` first, then the name as is.
 
 ### Output
 
@@ -64,12 +68,12 @@ UTF-8 JSON on standard output:
   "version": 1,
   "tasks": [
     {
-      "id": "CL-245",
-      "title": "Quest board",
+      "id": "PROJ-245",
+      "title": "Add a quest board",
       "status": "in_progress",
       "priority": "P2",
       "project": "owner/repo",
-      "url": "https://tracker.example/CL-245"
+      "url": "https://tracker.example/PROJ-245"
     }
   ]
 }
@@ -77,28 +81,34 @@ UTF-8 JSON on standard output:
 
 | Field | Required | Notes |
 |---|---|---|
-| `id` | yes | Shown as is; usually the tracker key. |
-| `title` | yes | Control characters are replaced by spaces. |
+| `id` | yes | Shown as is; usually the tracker key. No whitespace or control characters; must be unique. |
+| `title` | yes | Control and invisible formatting characters are replaced by spaces; cut at 300 characters. |
 | `status` | yes | One of `backlog`, `ready`, `in_progress`, `review`, `done`. Omit tasks in other states (e.g. cancelled). |
 | `priority` | no | Free text; `P0`-`P3` get colours. |
 | `project` | no | Matched to a project's `repo`, then to its `name` (case-insensitive). |
 | `url` | no | Only `http` and `https` links are shown. |
 
-Tasks with missing fields or unknown statuses are skipped and counted in a
-warning. A `version` other than `1` is an error.
+Tasks with missing fields, unknown statuses or duplicate ids are skipped and
+counted in a warning. Only the first 500 valid tasks are shown. A `version`
+other than `1` is an error.
 
 ### Errors and limits
 
 - Exit with a non-zero code on failure; the first line of standard error is
   shown in the panel.
-- A run is stopped after 20 seconds.
+- A run is stopped after 20 seconds, with every process it started.
 - Output larger than 4 MiB is rejected.
 
 ### Security notes for provider authors
 
 - Everything you print is treated as untrusted: titles are cleaned, links are
-  limited to http(s) and anything typed into a shell is quoted. Still, do not
-  include secrets in titles or links.
+  limited to http(s) and anything typed into a shell is quoted as a single
+  argument. On Windows the characters `cmd.exe` interprets (`" % & | < > ^ !`)
+  are replaced by look-alikes, because agents installed by npm are `.cmd`
+  shims. Still, do not include secrets in titles or links.
+- Task titles end up in an agent's prompt, so they are also untrusted input
+  for the agent. castorterm shows the exact prompt before the agent is
+  started; review it for tasks from sources you do not control.
 - Read credentials from your own environment or secret store; castorterm
   passes none.
 

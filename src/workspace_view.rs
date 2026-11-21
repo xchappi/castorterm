@@ -89,7 +89,8 @@ pub struct WorkspaceView {
     boards: HashMap<usize, BoardState>,
     next_board_ticket: u64,
     /// Task whose details and agent buttons are shown.
-    selected_task: Option<String>,
+    /// `(workspace, task id)`: ids repeat across trackers and repositories.
+    selected_task: Option<(usize, String)>,
     show_done: bool,
     _board_timer: gpui::Task<()>,
 }
@@ -276,6 +277,10 @@ impl WorkspaceView {
         if changed && !self.files.is_expanded(&node.path) {
             self.expand_dir(node.path.clone(), cx);
         }
+        if changed {
+            // Another workspace may now be on screen.
+            self.refresh_board_if_due(cx);
+        }
     }
 
     fn select_active_project(&mut self, cx: &mut Context<Self>) {
@@ -343,7 +348,7 @@ impl WorkspaceView {
         };
         let every = Duration::from_secs(config.refresh_secs);
         let due = self.boards.get(&workspace).is_none_or(|state| {
-            !state.loading && state.loaded_at.is_none_or(|at| at.elapsed() >= every)
+            board::refresh_due(state.loading, state.loaded_at.map(|at| at.elapsed()), every)
         });
         if due {
             self.load_board(workspace, cx);
@@ -358,10 +363,10 @@ impl WorkspaceView {
         let Some(config) = node.board.clone() else {
             return;
         };
-        let cwd = node
-            .projects
-            .first()
-            .map(|&p| self.tree.projects[p].path.clone());
+        // One provider process per board at a time.
+        if self.boards.get(&workspace).is_some_and(|s| s.loading) {
+            return;
+        }
         self.next_board_ticket += 1;
         let ticket = self.next_board_ticket;
         let state = self.boards.entry(workspace).or_default();
@@ -385,7 +390,6 @@ impl WorkspaceView {
                         &program,
                         &config.provider.args,
                         &config.filter,
-                        cwd.as_deref(),
                         provider::TIMEOUT,
                     )?;
                     board::parse_listing(&stdout)
@@ -941,6 +945,16 @@ impl WorkspaceView {
             }
             Some(Ok(listing)) => listing,
         };
+        if listing.omitted > 0 {
+            rows.push(note(
+                format!(
+                    "Showing the first {} tasks; {} more not shown",
+                    board::MAX_TASKS,
+                    listing.omitted
+                ),
+                MUTED,
+            ));
+        }
         if listing.skipped > 0 {
             rows.push(note(
                 format!(
@@ -1009,8 +1023,11 @@ impl WorkspaceView {
         workspace: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let selected = self.selected_task.as_deref() == Some(task.id.as_str());
-        let id = task.id.clone();
+        let selected = self
+            .selected_task
+            .as_ref()
+            .is_some_and(|(w, id)| *w == workspace && *id == task.id);
+        let key = (workspace, task.id.clone());
         let mut row = div()
             .flex()
             .flex_col()
@@ -1057,11 +1074,10 @@ impl WorkspaceView {
                             ),
                     )
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.selected_task =
-                            match this.selected_task.as_deref() == Some(id.as_str()) {
-                                true => None,
-                                false => Some(id.clone()),
-                            };
+                        this.selected_task = match this.selected_task.as_ref() == Some(&key) {
+                            true => None,
+                            false => Some(key.clone()),
+                        };
                         cx.notify();
                     })),
             );
@@ -1108,6 +1124,12 @@ impl WorkspaceView {
             })
             .collect::<Vec<_>>();
         let has_buttons = !buttons.is_empty();
+        // Show exactly what an agent will receive before it is started: the
+        // title comes from the tracker and is untrusted input for the agent.
+        let prompt = node
+            .board
+            .as_ref()
+            .map(|config| board::render_prompt(&config.prompt, task));
         div()
             .flex()
             .flex_col()
@@ -1117,6 +1139,11 @@ impl WorkspaceView {
             .text_size(px(SMALL_TEXT_SIZE))
             .text_color(rgb(MUTED))
             .child(SharedString::from(project_text))
+            .children(prompt.filter(|_| has_buttons).map(|prompt| {
+                div()
+                    .text_color(rgb(TEXT))
+                    .child(SharedString::from(format!("Prompt: {prompt}")))
+            }))
             .children(task.url.clone().map(|url| {
                 div()
                     .id(SharedString::from(format!("quest-link:{}", task.id)))

@@ -2,6 +2,9 @@
 //! projects and building the command that starts an agent on a task.
 //! Everything a provider returns is untrusted.
 
+use std::collections::HashSet;
+use std::time::Duration;
+
 use serde::Deserialize;
 
 use crate::config::PROMPT_PLACEHOLDER;
@@ -9,6 +12,10 @@ use crate::files::quote_for_shell;
 
 /// Contract version this build understands.
 pub const PROTOCOL_VERSION: u64 = 1;
+/// Tasks kept per listing; the rest are counted as omitted.
+pub const MAX_TASKS: usize = 500;
+/// Longer titles are cut (in characters).
+pub const MAX_TITLE_CHARS: usize = 300;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Status {
@@ -66,8 +73,10 @@ pub struct Task {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Listing {
     pub tasks: Vec<Task>,
-    /// Tasks dropped for missing fields or unknown statuses.
+    /// Tasks dropped for missing fields, unknown statuses or duplicate ids.
     pub skipped: usize,
+    /// Valid tasks beyond [`MAX_TASKS`].
+    pub omitted: usize,
 }
 
 #[derive(Deserialize)]
@@ -98,11 +107,14 @@ pub fn parse_listing(stdout: &str) -> Result<Listing, String> {
         ));
     }
     let mut listing = Listing::default();
+    let mut seen = HashSet::new();
     for value in raw.tasks {
         match serde_json::from_value::<RawTask>(value)
             .ok()
             .and_then(validate)
         {
+            Some(task) if !seen.insert(task.id.clone()) => listing.skipped += 1,
+            Some(_) if listing.tasks.len() >= MAX_TASKS => listing.omitted += 1,
             Some(task) => listing.tasks.push(task),
             None => listing.skipped += 1,
         }
@@ -111,9 +123,14 @@ pub fn parse_listing(stdout: &str) -> Result<Listing, String> {
 }
 
 fn validate(raw: RawTask) -> Option<Task> {
-    let id = clean(&raw.id);
-    let title = clean(&raw.title);
-    if id.is_empty() || title.is_empty() {
+    // Ids are identifiers: reject rather than rewrite odd ones, so the id
+    // shown and used in prompts is exactly the provider's.
+    let id = raw.id.trim().to_string();
+    if id.is_empty() || id.chars().any(|c| c.is_whitespace() || is_hidden(c)) {
+        return None;
+    }
+    let title = truncate(&clean(&raw.title), MAX_TITLE_CHARS);
+    if title.is_empty() {
         return None;
     }
     Some(Task {
@@ -129,14 +146,29 @@ fn validate(raw: RawTask) -> Option<Task> {
     })
 }
 
-/// Collapses control characters (newlines included) into spaces and trims.
+/// Control characters and invisible formatting characters (bidi overrides,
+/// zero-width characters) that could hide or reorder displayed text.
+fn is_hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+}
+
+/// Collapses control and invisible formatting characters (newlines
+/// included) into spaces and trims.
 pub fn clean(text: &str) -> String {
     text.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| if is_hidden(c) { ' ' } else { c })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn truncate(text: &str, max_chars: usize) -> String {
+    match text.char_indices().nth(max_chars) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text.to_string(),
+    }
 }
 
 fn is_web_link(url: &str) -> bool {
@@ -184,17 +216,52 @@ pub fn render_prompt(template: &str, task: &Task) -> String {
     clean(&rendered)
 }
 
+/// Characters `cmd.exe` interprets, swapped for look-alikes. Agents
+/// installed by npm on Windows are `.cmd` shims, and PowerShell passes
+/// arguments to them without escaping embedded `"`, so a crafted title could
+/// otherwise close the argument and run commands through `cmd.exe`.
+fn neutralize_cmd(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '"' => '\u{201D}',
+            '%' => '\u{FF05}',
+            '&' => '\u{FF06}',
+            '|' => '\u{FF5C}',
+            '<' => '\u{FF1C}',
+            '>' => '\u{FF1E}',
+            '^' => '\u{FF3E}',
+            '!' => '\u{FF01}',
+            other => other,
+        })
+        .collect()
+}
+
 /// The command line typed into the shell: the agent command followed by its
 /// `task_args`, with the prompt substituted and every argument quoted as a
-/// single literal.
+/// single literal. The prompt (untrusted) never starts with `-`, so the
+/// agent cannot read it as an option.
 pub fn agent_command(command: &str, task_args: &[String], prompt: &str, windows: bool) -> String {
+    let mut prompt = if windows {
+        neutralize_cmd(prompt)
+    } else {
+        prompt.to_string()
+    };
+    if prompt.starts_with('-') {
+        prompt = format!("Task: {prompt}");
+    }
     let mut line = command.to_string();
     for arg in task_args {
-        let arg = arg.replace(PROMPT_PLACEHOLDER, prompt);
+        let arg = arg.replace(PROMPT_PLACEHOLDER, &prompt);
         line.push(' ');
         line.push_str(&quote_for_shell(&arg, windows));
     }
     line
+}
+
+/// Whether a board should be reloaded: never while a load is running;
+/// otherwise when it was never loaded or `every` has passed.
+pub fn refresh_due(loading: bool, since_load: Option<Duration>, every: Duration) -> bool {
+    !loading && since_load.is_none_or(|elapsed| elapsed >= every)
 }
 
 #[cfg(test)]
@@ -215,17 +282,17 @@ mod tests {
     #[test]
     fn parses_a_valid_listing() {
         let json = r#"{"version":1,"tasks":[
-            {"id":"CL-1","title":"Fix login","status":"ready","priority":"P1",
-             "project":"x/app","url":"https://example.com/CL-1"}
+            {"id":"PROJ-1","title":"Fix login","status":"ready","priority":"P1",
+             "project":"x/app","url":"https://example.com/PROJ-1"}
         ]}"#;
         let listing = parse_listing(json).unwrap();
         assert_eq!(listing.skipped, 0);
         let t = &listing.tasks[0];
-        assert_eq!(t.id, "CL-1");
+        assert_eq!(t.id, "PROJ-1");
         assert_eq!(t.status, Status::Ready);
         assert_eq!(t.priority.as_deref(), Some("P1"));
         assert_eq!(t.project.as_deref(), Some("x/app"));
-        assert_eq!(t.url.as_deref(), Some("https://example.com/CL-1"));
+        assert_eq!(t.url.as_deref(), Some("https://example.com/PROJ-1"));
     }
 
     #[test]
@@ -240,6 +307,38 @@ mod tests {
         let listing = parse_listing(json).unwrap();
         assert_eq!(listing.tasks.len(), 1);
         assert_eq!(listing.skipped, 4);
+    }
+
+    #[test]
+    fn duplicate_and_odd_ids_are_skipped() {
+        let json = r#"{"version":1,"tasks":[
+            {"id":"A-1","title":"one","status":"ready"},
+            {"id":"A-1","title":"dup","status":"ready"},
+            {"id":"A 2","title":"space","status":"ready"},
+            {"id":"A-3\u202e","title":"bidi","status":"ready"}
+        ]}"#;
+        let listing = parse_listing(json).unwrap();
+        assert_eq!(listing.tasks.len(), 1);
+        assert_eq!(listing.skipped, 3);
+    }
+
+    #[test]
+    fn large_listings_and_titles_are_capped() {
+        let long = "x".repeat(MAX_TITLE_CHARS + 50);
+        let tasks: Vec<String> = (0..MAX_TASKS + 7)
+            .map(|i| format!(r#"{{"id":"T-{i}","title":"{long}","status":"backlog"}}"#))
+            .collect();
+        let json = format!(r#"{{"version":1,"tasks":[{}]}}"#, tasks.join(","));
+        let listing = parse_listing(&json).unwrap();
+        assert_eq!(listing.tasks.len(), MAX_TASKS);
+        assert_eq!(listing.omitted, 7);
+        assert_eq!(listing.tasks[0].title.chars().count(), MAX_TITLE_CHARS + 1);
+        assert!(listing.tasks[0].title.ends_with('…'));
+    }
+
+    #[test]
+    fn invisible_characters_are_removed() {
+        assert_eq!(clean("abc\u{202E}def\u{200B}g"), "abc def g");
     }
 
     #[test]
@@ -310,27 +409,68 @@ mod tests {
 
     #[test]
     fn prompt_rendering() {
-        let mut t = task("CL-9", Status::Ready);
-        t.url = Some("https://x/CL-9".into());
+        let mut t = task("PROJ-9", Status::Ready);
+        t.url = Some("https://x/PROJ-9".into());
         assert_eq!(
             render_prompt("Work on task {id}: {title} ({url})", &t),
-            "Work on task CL-9: Task CL-9 (https://x/CL-9)"
+            "Work on task PROJ-9: Task PROJ-9 (https://x/PROJ-9)"
         );
         t.url = None;
-        assert_eq!(render_prompt("{id} {url}", &t), "CL-9");
+        assert_eq!(render_prompt("{id} {url}", &t), "PROJ-9");
     }
 
     #[test]
     fn agent_command_quotes_each_argument() {
         let args = vec!["--prompt".to_string(), "{prompt}".to_string()];
         assert_eq!(
-            agent_command("opencode", &args, "Work on CL-1: it's done", true),
-            "opencode --prompt 'Work on CL-1: it''s done'"
+            agent_command("opencode", &args, "Work on PROJ-1: it's done", true),
+            "opencode --prompt 'Work on PROJ-1: it''s done'"
         );
         assert_eq!(
             agent_command("claude", &["{prompt}".into()], "a;b", false),
             "claude 'a;b'"
         );
+    }
+
+    #[test]
+    fn cmd_metacharacters_are_neutralized_on_windows() {
+        // A .cmd shim would run `calc` through cmd.exe if `"` and `&` survived.
+        let line = agent_command(
+            "claude",
+            &["{prompt}".into()],
+            "x\" & calc & \"y %PATH%",
+            true,
+        );
+        assert_eq!(
+            line,
+            "claude 'x\u{201D} \u{FF06} calc \u{FF06} \u{201D}y \u{FF05}PATH\u{FF05}'"
+        );
+        for bad in ['"', '%', '&', '|', '<', '>', '^', '!'] {
+            assert!(!line.contains(bad), "{bad}");
+        }
+        // POSIX shells only need the single-quote rules.
+        assert_eq!(
+            agent_command("claude", &["{prompt}".into()], "a & b", false),
+            "claude 'a & b'"
+        );
+    }
+
+    #[test]
+    fn prompt_never_starts_with_a_dash() {
+        assert_eq!(
+            agent_command("claude", &["{prompt}".into()], "--dangerous", false),
+            "claude 'Task: --dangerous'"
+        );
+    }
+
+    #[test]
+    fn refresh_timing() {
+        let every = Duration::from_secs(60);
+        assert!(refresh_due(false, None, every));
+        assert!(!refresh_due(true, None, every));
+        assert!(!refresh_due(false, Some(Duration::from_secs(10)), every));
+        assert!(refresh_due(false, Some(Duration::from_secs(60)), every));
+        assert!(!refresh_due(true, Some(Duration::from_secs(600)), every));
     }
 
     #[test]

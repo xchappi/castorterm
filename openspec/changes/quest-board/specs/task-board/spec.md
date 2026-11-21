@@ -14,8 +14,8 @@ array. Each task SHALL have `id`, `title` and a `status` among `backlog`, `ready
 in `docs/providers.md`.
 
 #### Scenario: Valid listing
-- **WHEN** the provider prints `{"version":1,"tasks":[{"id":"CL-1","title":"Fix login","status":"ready"}]}`
-- **THEN** task `CL-1 Fix login` appears in the Ready group
+- **WHEN** the provider prints `{"version":1,"tasks":[{"id":"PROJ-1","title":"Fix login","status":"ready"}]}`
+- **THEN** task `PROJ-1 Fix login` appears in the Ready group
 
 #### Scenario: Invalid tasks are skipped
 - **WHEN** the listing contains a task with status `cancelled` or without a title
@@ -27,9 +27,10 @@ in `docs/providers.md`.
 
 ### Requirement: Safe provider execution
 The provider command SHALL be resolved to an absolute path, searching only absolute `PATH` entries,
-and SHALL run off the UI thread with its input closed. A run SHALL be stopped after 20 seconds and
-its output SHALL be limited to 4 MiB. A non-zero exit code SHALL be reported with the first line of
-its error output.
+and SHALL run off the UI thread with its input closed and its own directory as working directory,
+at most one run per board at a time. A run SHALL be stopped after 20 seconds together with every
+process it started, and its output SHALL be limited to 4 MiB. A non-zero exit code SHALL be
+reported with the first line of its error output.
 
 #### Scenario: Provider fails
 - **WHEN** the provider exits with code 1 and prints `token missing` on stderr
@@ -46,7 +47,7 @@ collapsed by default, each task showing its priority, id and title. Workspaces w
 SHALL show how to configure one.
 
 #### Scenario: Board of the selected workspace
-- **WHEN** the selected project belongs to workspace `CastorLabs`, whose board uses provider `castortasks`
+- **WHEN** the selected project belongs to workspace `Acme`, whose board uses provider `tracker`
 - **THEN** the Quests tab lists the tasks returned by that provider for the workspace's filter
 
 ### Requirement: Board refresh
@@ -59,24 +60,29 @@ workspace SHALL be discarded.
 - **THEN** within `refresh_secs` seconds the task appears in the In progress group
 
 ### Requirement: Untrusted task data
-Text from a provider SHALL be displayed without control characters, links SHALL be shown only for
-`http` and `https` URLs, and any provider text typed into a shell SHALL be quoted as a single
-literal argument.
+Text from a provider SHALL be displayed without control or invisible formatting characters, links
+SHALL be shown only for `http` and `https` URLs, and any provider text typed into a shell SHALL
+reach the agent as a single literal argument, including on Windows when the agent is a `.cmd` or
+`.bat` file. Listings SHALL be limited to 500 tasks and titles to 300 characters.
 
 #### Scenario: Crafted title
 - **WHEN** a task title contains a newline followed by a command
 - **THEN** the title is shown on one line and starting an agent on it never runs that command
 
+#### Scenario: Title attacking a cmd shim
+- **WHEN** on Windows a task title is `x" & calc & "y` and the agent is `claude.cmd`
+- **THEN** the agent receives the whole title as text and `calc` is not run
+
 ### Requirement: Start an agent on a task
 Selecting a task SHALL show its project, its link and one button per agent that defines
-`task_args`. Activating a button SHALL open a session of that agent in the task's project (matched
+`task_args`, together with the exact prompt the agent will receive. Activating a button SHALL open a session of that agent in the task's project (matched
 by the project's `repo`, then by name; the selected project otherwise) running the agent command
 with `task_args`, where `{prompt}` is replaced by the workspace's prompt template rendered for the
 task.
 
 #### Scenario: Claude Code on a task
-- **WHEN** the agent `Claude Code` has `command = "claude"` and `task_args = ["{prompt}"]`, and the user starts it on task `CL-245` of project `xchappi/castorterm`
-- **THEN** a `Claude Code` session opens in the `castorterm` project directory running `claude 'Work on task CL-245: Quest board'`
+- **WHEN** the agent `Claude Code` has `command = "claude"` and `task_args = ["{prompt}"]`, and the user starts it on task `PROJ-245` whose project is `acme/app`
+- **THEN** a `Claude Code` session opens in the directory of the project with `repo = "acme/app"` running `claude 'Work on task PROJ-245: Add a quest board'`
 
 #### Scenario: Agent without task arguments
 - **WHEN** an agent has no `task_args`

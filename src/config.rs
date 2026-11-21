@@ -308,6 +308,12 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
             ));
             continue;
         }
+        if providers.iter().any(|p| p.name == name) {
+            settings.messages.push(format!(
+                "Provider '{name}' defined twice: the first definition is used"
+            ));
+            continue;
+        }
         providers.push(Provider {
             name: name.into(),
             command: command.into(),
@@ -650,6 +656,10 @@ mod tests {
             [[workspaces]]
             name = "V"
             board = { provider = "missing" }
+
+            [[providers]]
+            name = "tasks"
+            command = "other"
         "#;
         let home = PathBuf::from(abs("/home/me", "C:/Users/me"));
         let text = text.replace("\"/p\"", &format!("{:?}", abs("/p", "C:/p")));
@@ -667,8 +677,9 @@ mod tests {
         assert_eq!(board.refresh_secs, MIN_REFRESH_SECS);
         assert_eq!(s.workspaces[0].projects[0].repo.as_deref(), Some("x/p"));
         assert_eq!(s.workspaces[1].board, None);
-        // Bad task_args, low refresh and unknown provider are reported.
-        assert_eq!(s.messages.len(), 3, "{:?}", s.messages);
+        // Bad task_args, duplicate provider, low refresh and unknown
+        // provider are reported.
+        assert_eq!(s.messages.len(), 4, "{:?}", s.messages);
     }
 
     #[test]

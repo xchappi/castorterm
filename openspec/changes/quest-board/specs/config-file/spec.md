@@ -17,8 +17,8 @@ keys SHALL be rejected.
 - **THEN** terminals are drawn with that family and size
 
 #### Scenario: Board configured
-- **WHEN** the config defines provider `castortasks` and workspace `CastorLabs` with `board = { provider = "castortasks", filter = "repo:xchappi/*" }`
-- **THEN** the Quests tab of `CastorLabs` lists the tasks of that provider for that filter
+- **WHEN** the config defines provider `tracker` and workspace `Acme` with `board = { provider = "tracker", filter = "project:acme" }`
+- **THEN** the Quests tab of `Acme` lists the tasks of that provider for that filter
 
 #### Scenario: Board with unknown provider
 - **WHEN** a workspace board names a provider that is not defined

@@ -19,6 +19,7 @@
 //! `backlog`, or `in_progress` when they have an assignee; recently closed
 //! ones as `done`.
 
+use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 
 use serde::Deserialize;
@@ -64,7 +65,13 @@ fn run() -> Result<String, String> {
         return Err("the filter must be a repository like owner/repo".into());
     }
 
-    let output = Command::new("gh")
+    // Never run `gh` by bare name from an arbitrary working directory: on
+    // Windows that would also search the current directory, which may be an
+    // untrusted clone. Resolve it from absolute PATH entries and run it from
+    // a neutral directory.
+    let gh = find_gh().ok_or("gh (GitHub CLI) not found in PATH")?;
+    let output = Command::new(gh)
+        .current_dir(std::env::temp_dir())
         .args([
             "issue",
             "list",
@@ -103,6 +110,15 @@ fn run() -> Result<String, String> {
         })
         .collect();
     Ok(json!({ "version": 1, "tasks": tasks }).to_string())
+}
+
+/// Absolute path of `gh`, searching only absolute `PATH` entries.
+fn find_gh() -> Option<PathBuf> {
+    let name = if cfg!(windows) { "gh.exe" } else { "gh" };
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|path| path.is_file())
 }
 
 fn status(issue: &Issue) -> &'static str {
