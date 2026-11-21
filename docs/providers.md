@@ -39,8 +39,8 @@ repo = "owner/api"
 ```
 
 - The board shows the tasks of every project of the workspace: each distinct
-  `repo` is passed to the provider as `--project`. A `repo` must not start
-  with `-` nor contain spaces.
+  `repo` is passed to the provider as `--project`. A `repo` may only contain
+  ASCII letters, digits and `. _ - /`, and must not start with `-`.
 - `filter` is optional and opaque to castorterm: it is passed to the provider
   unchanged, to narrow the listing further (labels, assignee...).
 - `prompt` accepts `{id}`, `{title}` and `{url}`; the default is
@@ -98,8 +98,8 @@ UTF-8 JSON on standard output:
 | `id` | yes | Shown as is; usually the tracker key. No whitespace or control characters; must be unique across all projects. |
 | `title` | yes | Control and invisible formatting characters are replaced by spaces; cut at 300 characters. |
 | `status` | yes | One of `backlog`, `ready`, `in_progress`, `review`, `done`. Omit tasks in other states (e.g. cancelled). |
-| `priority` | no | Free text; `P0`-`P3` get colours. |
-| `project` | no | Matched to a project's `repo`, then to its `name` (case-insensitive). |
+| `priority` | no | Free text, cut at 64 characters; `P0`-`P3` get colours. |
+| `project` | no | Matched to a project's `repo`, then to its `name` (case-insensitive); cut at 64 characters. |
 | `url` | no | Only `http` and `https` links are shown. |
 
 Tasks with missing fields, unknown statuses or duplicate ids are skipped and

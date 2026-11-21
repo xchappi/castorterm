@@ -62,6 +62,9 @@ fn main() -> ExitCode {
     }
 }
 
+/// Issues per repository; castorterm shows at most 500 tasks in total.
+const LIMIT: &str = "500";
+
 const USAGE: &str =
     "usage: github_issues_provider list --filter <owner/repo> [--project <owner/repo>]...";
 
@@ -90,7 +93,12 @@ fn repositories(args: &[String]) -> Result<Vec<String>, String> {
     if rest.len() % 2 != 0 || rest.chunks(2).any(|pair| pair[0] != "--project") {
         return Err(USAGE.into());
     }
-    let mut repos: Vec<String> = rest.chunks(2).map(|pair| pair[1].clone()).collect();
+    let mut repos: Vec<String> = Vec::new();
+    for pair in rest.chunks(2) {
+        if !repos.iter().any(|r| r.eq_ignore_ascii_case(&pair[1])) {
+            repos.push(pair[1].clone());
+        }
+    }
     if repos.is_empty() && !filter.is_empty() {
         repos.push(filter.clone());
     }
@@ -134,7 +142,7 @@ fn issues(
             "--state",
             "all",
             "--limit",
-            "100",
+            LIMIT,
             "--json",
             "number,title,url,state,assignees,labels",
         ])

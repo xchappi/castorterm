@@ -10,7 +10,8 @@ not tell which project each task belongs to.
 - castorterm passes the workspace's project repositories to the provider:
   `list --filter <filter> --project <repo> --project <repo>...` (one per distinct `repo`, in
   config order). `filter` becomes optional.
-- Project `repo` values that start with `-` or contain whitespace are rejected with a warning.
+- Project `repo` values outside an allow list (ASCII letters, digits, `. _ - /`, not starting
+  with `-`) are rejected with a warning.
 - Each task row shows the project it belongs to when the workspace has more than one project.
 - The GitHub Issues example provider lists the issues of every `--project` repository (or of the
   filter when no project has a `repo`).

@@ -27,12 +27,13 @@ task_args = ["{prompt}"]
 name = "OpenCode"
 command = "opencode"
 
-# Workspaces group projects in the sidebar. Paths must be absolute; a
-# leading ~ is expanded to your home directory.
 # Task providers for the Quests tab (see docs/providers.md).
 [[providers]]
 name = "github"
 command = "github_issues_provider"
+
+# Workspaces group projects in the sidebar. Paths must be absolute; a
+# leading ~ is expanded to your home directory.
 
 [[workspaces]]
 name = "CastorLabs"

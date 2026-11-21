@@ -8,9 +8,10 @@ name. The provider is run as `<command> <args> list --filter <filter>`.
 - **Pass repositories, not names.** Only projects with a `repo` contribute a `--project` argument:
   names are local labels that a tracker does not know. Values are deduplicated ignoring ASCII case
   and keep config order, so the invocation is stable.
-- **Separate tokens** (`--project`, `<repo>`), never a shell. A repo starting with `-` is rejected
-  at config load so no provider parser can mistake it for a flag; whitespace is rejected because
-  repository identifiers never contain it.
+- **Separate tokens** (`--project`, `<repo>`), never a shell. Repos are checked at config load
+  against an allow list (ASCII letters, digits, `. _ - /`, not starting with `-`): no provider
+  parser can mistake one for a flag, and a `.cmd` provider, whose arguments `cmd.exe` re-parses,
+  never receives a metacharacter.
 - **Filter stays.** It is still passed (possibly empty) so providers can narrow further (labels,
   assignee...). Providers SHOULD return the union of the projects' tasks when `--project` is given.
 - **Project label on rows** only when the workspace has two or more projects; it shows the matched

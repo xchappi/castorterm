@@ -16,6 +16,8 @@ pub const PROTOCOL_VERSION: u64 = 1;
 pub const MAX_TASKS: usize = 500;
 /// Longer titles are cut (in characters).
 pub const MAX_TITLE_CHARS: usize = 300;
+/// Cap for short labels from the provider (`priority`, `project`).
+pub const MAX_LABEL_CHARS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Status {
@@ -137,13 +139,18 @@ fn validate(raw: RawTask) -> Option<Task> {
         id,
         title,
         status: Status::parse(raw.status.trim())?,
-        priority: raw.priority.map(|p| clean(&p)).filter(|p| !p.is_empty()),
-        project: raw.project.map(|p| clean(&p)).filter(|p| !p.is_empty()),
+        priority: raw.priority.map(|p| label(&p)).filter(|p| !p.is_empty()),
+        project: raw.project.map(|p| label(&p)).filter(|p| !p.is_empty()),
         url: raw
             .url
             .map(|u| u.trim().to_string())
             .filter(|u| is_web_link(u)),
     })
+}
+
+/// Cleaned and capped short label.
+fn label(text: &str) -> String {
+    truncate(&clean(text), MAX_LABEL_CHARS)
 }
 
 /// Control characters and invisible formatting characters (bidi overrides,
@@ -391,6 +398,17 @@ mod tests {
         let t = &parse_listing(json).unwrap().tasks[0];
         assert_eq!(t.title, "line rm -rf ~ [2J");
         assert_eq!(t.url, None);
+    }
+
+    #[test]
+    fn labels_are_capped() {
+        let long = "p".repeat(MAX_LABEL_CHARS * 3);
+        let json = format!(
+            "{{\"version\":1,\"tasks\":[{{\"id\":\"X\",\"title\":\"t\",\"status\":\"ready\",\"priority\":\"{long}\",\"project\":\"{long}\"}}]}}"
+        );
+        let t = &parse_listing(&json).unwrap().tasks[0];
+        assert!(t.project.as_ref().unwrap().chars().count() <= MAX_LABEL_CHARS + 1);
+        assert!(t.priority.as_ref().unwrap().chars().count() <= MAX_LABEL_CHARS + 1);
     }
 
     #[test]

@@ -125,7 +125,8 @@ pub struct Board {
 pub struct Project {
     pub name: String,
     pub path: PathBuf,
-    /// Repository identifier used to match tracker tasks (e.g. `owner/repo`).
+    /// Repository identifier (e.g. `owner/repo`): passed to the board
+    /// provider as `--project` and used to match tasks to this project.
     pub repo: Option<String>,
 }
 
@@ -345,7 +346,7 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
             let repo = match repo {
                 Some(r) if !valid_repo(&r) => {
                     settings.messages.push(format!(
-                        "Project '{name}': repo {r:?} ignored, it must not be empty, start with '-' or contain spaces"
+                        "Project '{name}': repo {r:?} ignored, use only letters, digits and . _ - / (not starting with -)"
                     ));
                     None
                 }
@@ -415,12 +416,16 @@ fn parse_board(
     })
 }
 
-/// A repository identifier is passed to providers as a `--project` value:
-/// it must not look like a flag nor contain whitespace or control characters.
+/// A repository identifier is passed to providers as a `--project` value.
+/// Allow list: ASCII letters, digits and `. _ - /`, not starting with `-`.
+/// Nothing a shell or `cmd.exe` interprets (a `.cmd` provider re-parses its
+/// arguments), and nothing a provider could take for a flag.
 fn valid_repo(repo: &str) -> bool {
     !repo.is_empty()
         && !repo.starts_with('-')
-        && !repo.chars().any(|c| c.is_whitespace() || c.is_control())
+        && repo
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
 }
 
 /// Non-empty and free of control characters: commands are typed into the
@@ -707,6 +712,19 @@ mod tests {
         // Bad task_args, duplicate provider, low refresh, two unsafe repos
         // and unknown provider are reported.
         assert_eq!(s.messages.len(), 6, "{:?}", s.messages);
+    }
+
+    #[test]
+    fn repo_allow_list() {
+        for ok in ["owner/repo", "a.b_c-d/E9", "CL"] {
+            assert!(valid_repo(ok), "{ok}");
+        }
+        for bad in [
+            "", "-x", "--all", "a b", "a\nb", "a&b", "a%PATH%", "a\"b", "a^b", "a!b", "a|b", "a<b",
+            "a>b", "a;b", "a'b", "a(b)", "a`b", "a$b", "rëpo",
+        ] {
+            assert!(!valid_repo(bad), "{bad:?}");
+        }
     }
 
     #[test]

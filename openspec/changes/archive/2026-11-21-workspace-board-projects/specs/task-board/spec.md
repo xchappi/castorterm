@@ -26,7 +26,7 @@ be documented in `docs/providers.md`.
 - **THEN** the provider runs as `<command> list --filter "" --project acme/app --project acme/api`
 
 #### Scenario: Unsafe repository identifier
-- **WHEN** a project has `repo = "--all"`
+- **WHEN** a project has `repo = "--all"` or `repo = "a&calc"`
 - **THEN** the repo is ignored with a configuration warning and is never passed to the provider
 
 ### Requirement: Quests panel
