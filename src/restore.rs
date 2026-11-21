@@ -50,32 +50,49 @@ pub fn load(path: &Path) -> SavedState {
         .unwrap_or_default()
 }
 
-/// Writes the state atomically (temporary file and rename).
+/// Writes the state atomically (synced temporary file and rename); the
+/// temporary file never outlives a failure.
 pub fn save(path: &Path, state: &SavedState) -> std::io::Result<()> {
+    use std::io::Write as _;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     let text = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let result = (|| {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
-    })
+    }
+    result
 }
 
 /// Deletes the state (nothing to restore next time).
-pub fn clear(path: &Path) {
+pub fn clear(path: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(path) {
-        Ok(()) => {}
-        Err(err) if err.kind() == ErrorKind::NotFound => {}
-        Err(_) => {}
+        Err(err) if err.kind() != ErrorKind::NotFound => Err(err),
+        _ => Ok(()),
+    }
+}
+
+/// Line typed to restore an agent: its command and its `resume_args`,
+/// space-separated and unquoted like the command itself (both come from
+/// the config, which the user wrote for their shell).
+pub fn resume_command(command: &str, resume_args: Option<&[String]>) -> String {
+    match resume_args {
+        Some(args) if !args.is_empty() => format!("{command} {}", args.join(" ")),
+        _ => command.to_string(),
     }
 }
 
 /// What to reopen: `(project, launcher)` for every saved session whose
 /// project is still listed in a workspace and whose launcher still exists,
 /// in order, at most [`MAX_SESSIONS`]; plus the position of the active one
-/// in that list.
+/// in that list. A folder listed in two workspaces maps to the first one.
 pub fn plan(
     state: &SavedState,
     tree: &ProjectTree,
@@ -182,6 +199,17 @@ mod tests {
     }
 
     #[test]
+    fn resume_command_appends_args() {
+        let args = ["--continue".to_string(), "-v".to_string()];
+        assert_eq!(
+            resume_command("claude", Some(&args)),
+            "claude --continue -v"
+        );
+        assert_eq!(resume_command("claude", Some(&[])), "claude");
+        assert_eq!(resume_command("claude", None), "claude");
+    }
+
+    #[test]
     fn save_load_and_bad_files() {
         let dir = std::env::temp_dir().join(format!("castorterm-restore-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -197,8 +225,8 @@ mod tests {
         assert_eq!(load(&path), SavedState::default());
         std::fs::write(&path, "x".repeat(MAX_FILE_BYTES as usize + 1)).unwrap();
         assert_eq!(load(&path), SavedState::default());
-        clear(&path);
-        clear(&path);
+        clear(&path).unwrap();
+        clear(&path).unwrap();
         assert!(!path.exists());
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
         std::fs::remove_dir_all(dir).unwrap();

@@ -311,7 +311,10 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
             None => None,
         };
         let resume_args = match agent.resume_args {
-            Some(args) if args.iter().all(|a| valid_text(a)) => Some(args),
+            Some(args) if args.is_empty() => None,
+            Some(args) if args.iter().all(|a| valid_text(a.trim())) => {
+                Some(args.iter().map(|a| a.trim().to_string()).collect())
+            }
             Some(_) => {
                 settings.messages.push(format!(
                     "Agent '{name}': resume_args ignored, they must be non-empty single lines"

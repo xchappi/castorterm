@@ -116,6 +116,8 @@ pub struct WorkspaceView {
     shown_title: String,
     /// Where the open sessions are saved to restore them next time.
     state_path: Option<PathBuf>,
+    /// Last state written, to skip identical writes.
+    saved_state: Option<SavedState>,
 }
 
 impl WorkspaceView {
@@ -173,6 +175,7 @@ impl WorkspaceView {
             branches_loading: false,
             shown_title: String::new(),
             state_path: None,
+            saved_state: None,
         };
         if let Some(node) = this.tree.projects.get(initial_project) {
             this.expand_dir(node.path.clone(), cx);
@@ -185,9 +188,12 @@ impl WorkspaceView {
         if !(restore_sessions && this.restore_from(state_path.as_deref(), window, cx)) {
             this.launch(initial_project, SHELL_LAUNCHER, window, cx);
         }
-        // Saving starts once the startup sessions are open.
-        this.state_path = state_path;
-        this.save_state();
+        // Saving starts once the startup sessions are open; with restoring
+        // off the file is never touched.
+        if restore_sessions {
+            this.state_path = state_path;
+            this.save_state();
+        }
         this.refresh_branches(cx);
         this
     }
@@ -204,7 +210,8 @@ impl WorkspaceView {
     }
 
     /// Like [`Self::launch`], typing `typed` instead of the launcher's own
-    /// command (used to pass a task prompt to an agent).
+    /// command (used to pass a task prompt to an agent). Returns the new
+    /// session, or `None` if it could not start.
     fn launch_with(
         &mut self,
         project: usize,
@@ -212,13 +219,13 @@ impl WorkspaceView {
         typed: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Option<SessionId> {
         let color = launcher_color(launcher);
         let (Some(node), Some(launcher)) = (
             self.tree.projects.get(project),
             self.launchers.get(launcher).cloned(),
         ) else {
-            return;
+            return None;
         };
         cx.notify();
         if !node.path.is_dir() {
@@ -226,7 +233,7 @@ impl WorkspaceView {
                 "Project directory not found: {}",
                 node.path.display()
             ));
-            return;
+            return None;
         }
 
         let (events_tx, events_rx) = mpsc::unbounded();
@@ -234,7 +241,7 @@ impl WorkspaceView {
             Ok(session) => session,
             Err(err) => {
                 self.launch_error = Some(format!("{err:#}"));
-                return;
+                return None;
             }
         };
         if let Some(command) = typed.or(launcher.command.clone()) {
@@ -246,7 +253,7 @@ impl WorkspaceView {
         let gate = self.input_gate.clone();
         let view = cx.new(|cx| TerminalView::new(session, events_rx, style, gate, cx));
         let subscription = cx.subscribe_in(&view, window, Self::on_terminal_event);
-        self.tabs.open(
+        let id = self.tabs.open(
             project,
             &launcher.name,
             OpenSession {
@@ -260,6 +267,7 @@ impl WorkspaceView {
         self.save_state();
         self.select_project(project, cx);
         self.focus_active(window, cx);
+        Some(id)
     }
 
     fn on_terminal_event(
@@ -318,29 +326,28 @@ impl WorkspaceView {
             return false;
         };
         let (sessions, active) = restore::plan(&restore::load(path), &self.tree, &self.launchers);
+        // One entry per planned session, `None` when it could not start, so
+        // `active` (a position in the plan) still points at the right one.
         let mut opened = Vec::new();
         for (project, launcher) in sessions {
             // Typed text comes from the config only, never from the file.
-            let typed = self.launchers[launcher].command.as_ref().map(|command| {
-                match &self.launchers[launcher].resume_args {
-                    Some(args) if !args.is_empty() => format!("{command} {}", args.join(" ")),
-                    _ => command.clone(),
-                }
+            let typed = self.launchers[launcher].command.as_deref().map(|command| {
+                restore::resume_command(command, self.launchers[launcher].resume_args.as_deref())
             });
-            self.launch_with(project, launcher, typed, window, cx);
-            opened.extend(self.tabs.active_id());
+            opened.push(self.launch_with(project, launcher, typed, window, cx));
         }
-        if let Some(&id) = active.and_then(|i| opened.get(i)) {
+        if let Some(id) = active.and_then(|i| opened.get(i).copied().flatten()) {
             self.tabs.activate(id);
             self.select_active_project(cx);
             self.focus_active(window, cx);
         }
-        !opened.is_empty()
+        opened.iter().any(Option::is_some)
     }
 
-    /// Writes the open sessions (project and launcher) for the next start.
-    fn save_state(&self) {
-        let Some(path) = &self.state_path else {
+    /// Writes the open sessions (project and launcher) for the next start,
+    /// only when they changed since the last write.
+    fn save_state(&mut self) {
+        let Some(path) = self.state_path.clone() else {
             return;
         };
         let active = self.tabs.active_id();
@@ -354,11 +361,21 @@ impl WorkspaceView {
                 launcher: tab.handle.launcher.clone(),
             });
         }
-        if state.sessions.is_empty() {
-            restore::clear(path);
+        if self.saved_state.as_ref() == Some(&state) {
+            return;
+        }
+        // Best effort: a failure only means starting with one shell (or
+        // reopening sessions the user closed), so it is reported but not fatal.
+        let result = if state.sessions.is_empty() {
+            restore::clear(&path)
         } else {
-            // Best effort: losing it only means starting with one shell.
-            let _ = restore::save(path, &state);
+            restore::save(&path, &state)
+        };
+        match result {
+            Ok(()) => self.saved_state = Some(state),
+            Err(err) => {
+                self.notice = Some(format!("Could not save the open sessions: {err}"));
+            }
         }
     }
 
