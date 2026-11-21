@@ -41,6 +41,10 @@ tab bar.
 
 castorterm exits when the last session closes.
 
+Each launcher has its own colour (the shell is green, agents follow), used
+for its sessions in the sidebar, the tab bar and the frame of the active
+terminal.
+
 ## Configuration
 
 Optional TOML file at `%APPDATA%\castorterm\config.toml` (Windows) or
@@ -70,6 +74,13 @@ found automatically).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Specs and change proposals live in
 [`openspec/`](openspec/).
+
+## Credits
+
+Bundled fonts, both under the SIL Open Font License 1.1 (see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)):
+[Chakra Petch](https://github.com/m4rc1e/Chakra-Petch) (UI) and
+[Press Start 2P](https://github.com/codeman38/PressStart2P) (logo).
 
 ## License
 

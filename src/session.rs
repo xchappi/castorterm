@@ -295,7 +295,7 @@ mod tests {
         };
         assert!(matches!(next(), Some(SessionEvent::Wakeup)));
         assert!(matches!(next(), Some(SessionEvent::PtyWrite(s)) if s == "\x1b[0n"));
-        assert!(matches!(next(), Some(SessionEvent::PtyWrite(s)) if s == "1e1e1e"));
+        assert!(matches!(next(), Some(SessionEvent::PtyWrite(s)) if s == "0d0b1e"));
         assert!(matches!(next(), Some(SessionEvent::Exit)));
         assert!(next().is_none());
     }

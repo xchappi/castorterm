@@ -11,6 +11,7 @@ mod session;
 mod shell;
 mod shortcuts;
 mod tabs;
+mod theme;
 mod tree;
 mod view;
 mod workspace_view;
@@ -38,7 +39,21 @@ fn main() {
         .or_else(|| config::Env::from_process().home)
         .unwrap_or_else(|| std::path::PathBuf::from(std::path::MAIN_SEPARATOR_STR));
 
+    let mut settings = settings;
     Application::new().run(move |cx: &mut App| {
+        // Without the bundled fonts the chrome falls back to the system font.
+        // One call per font: on Windows a failing font aborts the whole batch.
+        for (family, bytes) in theme::BUNDLED_FONTS {
+            if let Err(err) = cx
+                .text_system()
+                .add_fonts(vec![std::borrow::Cow::Borrowed(bytes)])
+            {
+                // Release builds have no console: report it in the sidebar.
+                settings
+                    .messages
+                    .push(format!("Could not load the {family} font: {err:#}"));
+            }
+        }
         if let Err(err) = open_workspace_window(settings, launch_dir, cx) {
             eprintln!("castorterm: {err:#}");
             // Nothing is on screen yet: exit right away with a failure code.

@@ -23,6 +23,14 @@ struct RawConfig {
     agents: Vec<RawAgent>,
     #[serde(default)]
     workspaces: Vec<RawWorkspace>,
+    #[serde(default)]
+    ui: RawUi,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawUi {
+    scanlines: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -74,14 +82,29 @@ pub struct Workspace {
 }
 
 /// Validated configuration plus the problems found while loading it.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
     pub agents: Vec<Agent>,
     pub workspaces: Vec<Workspace>,
+    /// CRT-style scanlines over the terminal (on by default).
+    pub scanlines: bool,
     /// Human readable warnings and errors for the sidebar.
     pub messages: Vec<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            font_family: None,
+            font_size: None,
+            agents: Vec::new(),
+            workspaces: Vec::new(),
+            scanlines: true,
+            messages: Vec::new(),
+        }
+    }
 }
 
 /// The environment values that decide where the config lives.
@@ -162,7 +185,10 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
         }
         None => e.message().to_string(),
     })?;
-    let mut settings = Settings::default();
+    let mut settings = Settings {
+        scanlines: raw.ui.scanlines.unwrap_or(true),
+        ..Settings::default()
+    };
 
     settings.font_family = raw
         .font
@@ -441,6 +467,13 @@ mod tests {
         assert_eq!(s.workspaces.len(), 1);
         assert!(s.workspaces[0].projects.is_empty());
         assert_eq!(s.messages.len(), 3);
+    }
+
+    #[test]
+    fn scanlines_default_on_and_can_be_disabled() {
+        assert!(parse("", None).unwrap().scanlines);
+        assert!(!parse("[ui]\nscanlines = false", None).unwrap().scanlines);
+        assert!(parse("[ui]\nglow = true", None).is_err());
     }
 
     #[test]

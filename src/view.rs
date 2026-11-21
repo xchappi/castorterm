@@ -26,21 +26,27 @@ const FONT_FAMILY: &str = "DejaVu Sans Mono";
 
 const FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT: f32 = 1.3;
-const CURSOR_ALPHA: f32 = 0.6;
+const CURSOR_ALPHA: f32 = 0.7;
+/// One dark line every `SCANLINE_PERIOD` pixels, faint enough to keep text readable.
+const SCANLINE_PERIOD: f32 = 3.0;
+const SCANLINE_ALPHA: f32 = 0.10;
 
 /// Font used to draw a terminal.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TerminalStyle {
     pub family: SharedString,
     pub size: f32,
+    /// Draw CRT-style scanlines over the text.
+    pub scanlines: bool,
 }
 
 impl TerminalStyle {
     /// Platform defaults for anything the config does not set.
-    pub fn new(family: Option<&str>, size: Option<f32>) -> Self {
+    pub fn new(family: Option<&str>, size: Option<f32>, scanlines: bool) -> Self {
         Self {
             family: family.unwrap_or(FONT_FAMILY).to_string().into(),
             size: size.unwrap_or(FONT_SIZE),
+            scanlines,
         }
     }
 }
@@ -140,6 +146,7 @@ impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let session = self.session.clone();
         let style = self.style.clone();
+        let scanlines = style.scanlines;
         let focus_handle = self.focus_handle.clone();
         let entity = cx.entity();
 
@@ -153,6 +160,9 @@ impl Render for TerminalView {
                     move |bounds, window, _cx| layout_frame(&session, &style, bounds, window),
                     move |bounds, frame, window, cx| {
                         paint_frame(bounds, frame, window, cx);
+                        if scanlines {
+                            paint_scanlines(bounds, window);
+                        }
                         window.handle_input(
                             &focus_handle,
                             ElementInputHandler::new(bounds, entity),
@@ -321,6 +331,40 @@ fn paint_frame(bounds: Bounds<Pixels>, frame: Frame, window: &mut Window, cx: &m
     }
 }
 
+/// Horizontal dark lines over the whole terminal, like an old CRT.
+fn paint_scanlines(bounds: Bounds<Pixels>, window: &mut Window) {
+    let color = to_hsla(Rgb8::hex(0x000000), SCANLINE_ALPHA);
+    let scale = window.scale_factor();
+    // Lines are snapped to whole device pixels so they stay sharp at
+    // fractional scale factors (125 %, 150 %).
+    let line_height = scale.round().max(1.0) / scale;
+    let top = bounds.origin.y / px(1.0);
+    for y in scanline_offsets(bounds.size.height / px(1.0)) {
+        let y = snap_to_device(top + y, scale);
+        window.paint_quad(fill(
+            Bounds::new(
+                point(bounds.origin.x, px(y)),
+                size(bounds.size.width, px(line_height)),
+            ),
+            color,
+        ));
+    }
+}
+
+/// Rounds a logical coordinate to the nearest device pixel.
+fn snap_to_device(value: f32, scale: f32) -> f32 {
+    (value * scale).round() / scale
+}
+
+/// Y offsets (in pixels from the top) of the scanlines for a given height.
+fn scanline_offsets(height: f32) -> impl Iterator<Item = f32> {
+    let count = (height.max(0.0) / SCANLINE_PERIOD).ceil() as usize;
+    (0..count)
+        .map(|i| i as f32 * SCANLINE_PERIOD + (SCANLINE_PERIOD - 1.0))
+        // Only lines that fit completely, so nothing is drawn below the area.
+        .filter(move |y| *y + 1.0 <= height)
+}
+
 fn to_hsla(color: Rgb8, alpha: f32) -> Hsla {
     Rgba {
         r: color.r as f32 / 255.0,
@@ -406,5 +450,41 @@ impl EntityInputHandler for TerminalView {
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scanlines_cover_the_height_without_overflowing() {
+        let ys: Vec<f32> = scanline_offsets(10.0).collect();
+        assert_eq!(ys, vec![2.0, 5.0, 8.0]);
+        assert!(scanline_offsets(0.0).next().is_none());
+        assert!(scanline_offsets(-5.0).next().is_none());
+        // Fractional heights never overflow the area.
+        let ys: Vec<f32> = scanline_offsets(8.5).collect();
+        assert_eq!(ys, vec![2.0, 5.0]);
+        let ys: Vec<f32> = scanline_offsets(9.0).collect();
+        assert_eq!(ys, vec![2.0, 5.0, 8.0]);
+    }
+
+    #[test]
+    fn snapping_to_device_pixels() {
+        assert_eq!(snap_to_device(10.3, 1.0), 10.0);
+        assert_eq!(snap_to_device(10.3, 1.5), 10.0);
+        assert_eq!(snap_to_device(10.4, 1.5), 16.0 / 1.5);
+        assert_eq!(snap_to_device(10.5, 2.0), 10.5);
+    }
+
+    #[test]
+    fn style_defaults() {
+        let style = TerminalStyle::new(None, None, true);
+        assert_eq!(style.family.as_ref(), FONT_FAMILY);
+        assert_eq!(style.size, FONT_SIZE);
+        let style = TerminalStyle::new(Some("VT323"), Some(18.0), false);
+        assert_eq!(style.family.as_ref(), "VT323");
+        assert!(!style.scanlines);
     }
 }

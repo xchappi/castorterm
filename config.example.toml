@@ -9,6 +9,10 @@
 family = "Cascadia Mono"
 size = 14
 
+[ui]
+# CRT-style scanlines over the terminal.
+scanlines = true
+
 # Agent launchers. Each one opens your shell in the project directory and
 # types `command` into it, so the shell stays open when the agent exits.
 # The command lands in your shell history: do not put API keys in it, use
