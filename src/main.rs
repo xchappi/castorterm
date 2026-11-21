@@ -4,10 +4,12 @@
 // when launched from Explorer. Debug builds keep the console for logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod board;
 mod config;
 mod files;
 mod keys;
 mod palette;
+mod provider;
 mod session;
 mod shell;
 mod shortcuts;
