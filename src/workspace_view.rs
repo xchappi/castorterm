@@ -236,6 +236,7 @@ impl WorkspaceView {
     /// never freezes the window; the tree shows a loading row meanwhile.
     fn load_dirs(&mut self, dirs: Vec<PathBuf>, cx: &mut Context<Self>) {
         for dir in dirs {
+            let ticket = self.files.ticket(&dir);
             cx.spawn(async move |this, cx| {
                 let target = dir.clone();
                 let listing = cx
@@ -243,7 +244,7 @@ impl WorkspaceView {
                     .await;
                 // The view may be gone if the window closed meanwhile.
                 let _ = this.update(cx, |this, cx| {
-                    this.files.set_listing(&dir, listing);
+                    this.files.set_listing(&dir, ticket, listing);
                     cx.notify();
                 });
             })

@@ -86,11 +86,18 @@ pub enum Row {
     },
 }
 
+/// Identifies one load request, so a slow, older read cannot overwrite a
+/// newer one for the same folder.
+pub type LoadTicket = u64;
+
 /// Expanded folders and their latest listings.
 #[derive(Default)]
 pub struct FileTree {
     expanded: BTreeSet<PathBuf>,
     listings: HashMap<PathBuf, LoadResult>,
+    /// Latest ticket issued per folder.
+    tickets: HashMap<PathBuf, LoadTicket>,
+    next_ticket: LoadTicket,
 }
 
 impl FileTree {
@@ -98,17 +105,25 @@ impl FileTree {
         self.expanded.contains(dir)
     }
 
-    /// Marks `dir` expanded. The caller must [`load`] it and pass the result
-    /// to [`FileTree::set_listing`]; until then a loading row is shown (or
-    /// the previous listing, if any).
+    /// Marks `dir` expanded. The caller must take a [`FileTree::ticket`],
+    /// [`load`] the folder and pass both to [`FileTree::set_listing`]; until
+    /// then a loading row is shown (or the previous listing, if any).
     pub fn expand(&mut self, dir: &Path) {
         self.expanded.insert(dir.to_path_buf());
+    }
+
+    /// Starts a load of `dir`; only the latest ticket's result is kept.
+    pub fn ticket(&mut self, dir: &Path) -> LoadTicket {
+        self.next_ticket += 1;
+        self.tickets.insert(dir.to_path_buf(), self.next_ticket);
+        self.next_ticket
     }
 
     /// Collapses `dir` and forgets its expanded descendants.
     pub fn collapse(&mut self, dir: &Path) {
         self.expanded.retain(|p| !p.starts_with(dir));
         self.listings.retain(|p, _| !p.starts_with(dir));
+        self.tickets.retain(|p, _| !p.starts_with(dir));
     }
 
     /// Expands or collapses `dir`; returns true if it now needs loading.
@@ -122,9 +137,10 @@ impl FileTree {
         }
     }
 
-    /// Stores a listing, unless the folder was collapsed meanwhile.
-    pub fn set_listing(&mut self, dir: &Path, listing: LoadResult) {
-        if self.is_expanded(dir) {
+    /// Stores a listing, unless the folder was collapsed meanwhile or a
+    /// newer load of it was started.
+    pub fn set_listing(&mut self, dir: &Path, ticket: LoadTicket, listing: LoadResult) {
+        if self.is_expanded(dir) && self.tickets.get(dir) == Some(&ticket) {
             self.listings.insert(dir.to_path_buf(), listing);
         }
     }
@@ -250,12 +266,17 @@ mod tests {
     /// Expands and loads synchronously, as the view does in the background.
     fn expand_now(tree: &mut FileTree, dir: &Path) {
         tree.expand(dir);
-        tree.set_listing(dir, load(dir));
+        load_now(tree, dir);
+    }
+
+    fn load_now(tree: &mut FileTree, dir: &Path) {
+        let ticket = tree.ticket(dir);
+        tree.set_listing(dir, ticket, load(dir));
     }
 
     fn refresh_now(tree: &mut FileTree) {
         for dir in tree.expanded_dirs() {
-            tree.set_listing(&dir, load(&dir));
+            load_now(tree, &dir);
         }
     }
 
@@ -311,7 +332,7 @@ mod tests {
         assert_eq!(names(&tree.rows(&dir)), ["0:src", "0:Cargo.toml"]);
 
         assert!(tree.toggle(&dir.join("src")));
-        tree.set_listing(&dir.join("src"), load(&dir.join("src")));
+        load_now(&mut tree, &dir.join("src"));
         assert_eq!(
             names(&tree.rows(&dir)),
             ["0:src", "1:deep", "1:main.rs", "0:Cargo.toml"]
@@ -330,8 +351,9 @@ mod tests {
         let dir = temp_dir("loading");
         let mut tree = FileTree::default();
         tree.expand(&dir);
+        let ticket = tree.ticket(&dir);
         assert_eq!(names(&tree.rows(&dir)), ["0:<loading>"]);
-        tree.set_listing(&dir, Ok(Listing::default()));
+        tree.set_listing(&dir, ticket, Ok(Listing::default()));
         assert!(tree.rows(&dir).is_empty());
         fs::remove_dir_all(dir).unwrap();
     }
@@ -341,10 +363,33 @@ mod tests {
         let dir = temp_dir("late");
         let mut tree = FileTree::default();
         tree.expand(&dir);
+        let ticket = tree.ticket(&dir);
         tree.collapse(&dir);
-        tree.set_listing(&dir, load(&dir));
+        tree.set_listing(&dir, ticket, load(&dir));
         tree.expand(&dir);
         assert_eq!(names(&tree.rows(&dir)), ["0:<loading>"]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn older_load_cannot_overwrite_newer() {
+        let dir = temp_dir("race");
+        let mut tree = FileTree::default();
+        tree.expand(&dir);
+        let old = tree.ticket(&dir);
+        let new = tree.ticket(&dir);
+        let fresh = Listing {
+            entries: vec![Entry {
+                name: "fresh.rs".into(),
+                path: dir.join("fresh.rs"),
+                is_dir: false,
+            }],
+            omitted: 0,
+        };
+        tree.set_listing(&dir, new, Ok(fresh));
+        // The older, slower read arrives last and must be dropped.
+        tree.set_listing(&dir, old, Ok(Listing::default()));
+        assert_eq!(names(&tree.rows(&dir)), ["0:fresh.rs"]);
         fs::remove_dir_all(dir).unwrap();
     }
 

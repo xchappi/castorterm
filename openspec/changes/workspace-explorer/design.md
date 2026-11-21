@@ -30,8 +30,9 @@ The explorer shows the workspace that contains the selected project.
 - `FileTree` never reads the disk itself: expanding marks the folder and the view lists it with
   `files::load` on a background thread (`cx.background_spawn`), then stores the result. Until it
   arrives the tree shows a "Loading…" row, so a stalled network drive cannot freeze the window or
-  the terminal. Late results for folders collapsed in the meantime are dropped. Rendering only
-  reads the cache.
+  the terminal. Each load gets a ticket; results for folders collapsed in the meantime, or older
+  than the latest load of that folder (double refresh), are dropped. Rendering only reads the
+  cache.
 - Entries that fail to read are skipped; only an unreadable folder shows an error row.
 - Symlinked folders can be expanded. Expansion is user-driven, so a symlink loop only grows as far
   as the user clicks.
@@ -54,6 +55,10 @@ typed into a shell**. The inserted text must always be a single literal argument
   all of them are doubled inside the string, not only ASCII `'`. POSIX shells only need `'\''`.
 - A relative path starting with `-` is prefixed with `./` so it is not read as an option.
 - Paths that are not valid Unicode or contain control characters are not inserted.
+- Known limit: PowerShell parsing is safe, but Windows PowerShell 5.1 does not escape embedded
+  `"` when it passes an argument to a native program, so a name containing `"` can be split into
+  several arguments by that program. This is argument splitting in the next command the user runs,
+  not code execution.
 - The quoting flavour follows the platform: on Windows sessions always run PowerShell (see
   `shell.rs`); on other platforms a POSIX-like shell is assumed (fish quoting is not special-cased).
 
