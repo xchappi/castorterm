@@ -11,7 +11,7 @@ use gpui::{
 };
 
 use crate::config::Settings;
-use crate::files::{FileTree, Row, path_for_terminal};
+use crate::files::{self, FileTree, Row, path_for_terminal};
 use crate::keys::Mods;
 use crate::palette::DEFAULT_THEME;
 use crate::session::{GridSize, Session};
@@ -86,7 +86,9 @@ impl WorkspaceView {
             files: FileTree::default(),
             show_files: true,
         };
-        this.select_project(initial_project);
+        if let Some(node) = this.tree.projects.get(initial_project) {
+            this.expand_dir(node.path.clone(), cx);
+        }
         this.launch(initial_project, SHELL_LAUNCHER, window, cx);
         this
     }
@@ -141,6 +143,7 @@ impl WorkspaceView {
             },
         );
         self.launch_error = None;
+        self.select_project(project, cx);
         self.focus_active(window, cx);
     }
 
@@ -162,6 +165,7 @@ impl WorkspaceView {
 
     /// Ends a session and removes its tab; quits when none are left.
     fn close(&mut self, id: SessionId, window: &mut Window, cx: &mut Context<Self>) {
+        let closed_project = self.tabs.iter().find(|t| t.id == id).map(|t| t.project);
         let Some(session) = self.tabs.close(id) else {
             return;
         };
@@ -170,39 +174,80 @@ impl WorkspaceView {
             cx.quit();
             return;
         }
+        if closed_project == Some(self.selected_project) {
+            self.select_active_project(cx);
+        }
         self.focus_active(window, cx);
         cx.notify();
     }
 
     fn activate(&mut self, id: SessionId, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.activate(id) {
+            self.select_active_project(cx);
             self.focus_active(window, cx);
             cx.notify();
         }
     }
 
     /// Gives keyboard focus to the active terminal and updates the title.
-    fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.active() else {
             window.set_window_title("castorterm");
             return;
         };
         let handle = tab.handle.view.read(cx).focus_handle(cx);
         window.focus(&handle);
-        let project = tab.project;
-        let name = &self.tree.projects[project].name;
+        let name = &self.tree.projects[tab.project].name;
         window.set_window_title(&format!("{} · {name} — castorterm", tab.label));
-        self.select_project(project);
     }
 
-    /// Selects a project and expands its root in the explorer.
-    fn select_project(&mut self, project: usize) {
+    /// Selects a project. When the selection changes, its root is expanded
+    /// in the explorer; a root the user collapsed stays collapsed otherwise.
+    fn select_project(&mut self, project: usize, cx: &mut Context<Self>) {
         let Some(node) = self.tree.projects.get(project) else {
             return;
         };
+        let changed = project != self.selected_project;
         self.selected_project = project;
-        if !self.files.is_expanded(&node.path) {
-            self.files.expand(&node.path);
+        if changed && !self.files.is_expanded(&node.path) {
+            self.expand_dir(node.path.clone(), cx);
+        }
+    }
+
+    fn select_active_project(&mut self, cx: &mut Context<Self>) {
+        if let Some(project) = self.tabs.active().map(|t| t.project) {
+            self.select_project(project, cx);
+        }
+    }
+
+    fn expand_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        self.files.expand(&dir);
+        self.load_dirs(vec![dir], cx);
+    }
+
+    fn toggle_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        if self.files.toggle(&dir) {
+            self.load_dirs(vec![dir], cx);
+        }
+        cx.notify();
+    }
+
+    /// Lists folders on a background thread so a slow or stalled drive
+    /// never freezes the window; the tree shows a loading row meanwhile.
+    fn load_dirs(&mut self, dirs: Vec<PathBuf>, cx: &mut Context<Self>) {
+        for dir in dirs {
+            cx.spawn(async move |this, cx| {
+                let target = dir.clone();
+                let listing = cx
+                    .background_spawn(async move { files::load(&target) })
+                    .await;
+                // The view may be gone if the window closed meanwhile.
+                let _ = this.update(cx, |this, cx| {
+                    this.files.set_listing(&dir, listing);
+                    cx.notify();
+                });
+            })
+            .detach();
         }
     }
 
@@ -211,6 +256,8 @@ impl WorkspaceView {
         let Some(tab) = self.tabs.active() else {
             return;
         };
+        // Relative to the session's project when the file is inside it,
+        // absolute otherwise (e.g. a file of another project in the workspace).
         let project = &self.tree.projects[tab.project].path;
         if let Some(text) = path_for_terminal(file, project, cfg!(windows)) {
             tab.handle.view.read(cx).type_text(&format!("{text} "));
@@ -250,11 +297,13 @@ impl WorkspaceView {
             }
             Shortcut::NextSession => {
                 self.tabs.next();
+                self.select_active_project(cx);
                 self.focus_active(window, cx);
                 cx.notify();
             }
             Shortcut::PrevSession => {
                 self.tabs.prev();
+                self.select_active_project(cx);
                 self.focus_active(window, cx);
                 cx.notify();
             }
@@ -423,7 +472,7 @@ impl WorkspaceView {
                             )
                             .child(SharedString::from(node.name.clone()))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.select_project(project);
+                                this.select_project(project, cx);
                                 cx.notify();
                             })),
                     )
@@ -501,17 +550,15 @@ impl WorkspaceView {
                 let expanded = self.files.is_expanded(&root);
                 let is_selected = project == self.selected_project;
                 rows.push(
-                    tree_row(rows.len(), 0, chevron(expanded))
+                    tree_row(row_id("root", &root), 0, chevron(expanded))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(if is_selected { TEXT } else { MUTED }))
                         .child(SharedString::from(node.name.clone()))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.files.toggle(&root);
-                            cx.notify();
+                            this.toggle_dir(root.clone(), cx);
                         })),
                 );
                 for row in self.files.rows(&node.path) {
-                    let index = rows.len();
                     rows.push(match row {
                         Row::Entry {
                             depth,
@@ -520,7 +567,7 @@ impl WorkspaceView {
                         } => {
                             let path = entry.path.clone();
                             let base = tree_row(
-                                index,
+                                row_id("entry", &path),
                                 depth + 1,
                                 if entry.is_dir { chevron(expanded) } else { "" },
                             );
@@ -528,8 +575,7 @@ impl WorkspaceView {
                                 base.text_color(rgb(TEXT))
                                     .child(SharedString::from(entry.name))
                                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.files.toggle(&path);
-                                        cx.notify();
+                                        this.toggle_dir(path.clone(), cx);
                                     }))
                             } else {
                                 base.text_color(rgb(file_color(&entry.name)))
@@ -541,12 +587,23 @@ impl WorkspaceView {
                                     ))
                             }
                         }
-                        Row::Error { depth, message } => tree_row(index, depth + 1, "")
+                        Row::Loading { depth, dir } => {
+                            tree_row(row_id("loading", &dir), depth + 1, "")
+                                .text_color(rgb(MUTED))
+                                .child("Loading…")
+                        }
+                        Row::Error {
+                            depth,
+                            dir,
+                            message,
+                        } => tree_row(row_id("error", &dir), depth + 1, "")
                             .text_color(rgb(ERROR))
                             .child(SharedString::from(format!("Cannot read: {message}"))),
-                        Row::More { depth, count } => tree_row(index, depth + 1, "")
-                            .text_color(rgb(MUTED))
-                            .child(SharedString::from(format!("… {count} more"))),
+                        Row::More { depth, dir, count } => {
+                            tree_row(row_id("more", &dir), depth + 1, "")
+                                .text_color(rgb(MUTED))
+                                .child(SharedString::from(format!("… {count} more")))
+                        }
                     });
                 }
             }
@@ -584,8 +641,8 @@ impl WorkspaceView {
                     .hover(|s| s.bg(rgba(with_alpha(ACCENT, 0x22))).text_color(rgb(ACCENT)))
                     .child("Refresh")
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.files.refresh();
-                        cx.notify();
+                        let dirs = this.files.expanded_dirs();
+                        this.load_dirs(dirs, cx);
                     })),
             );
 
@@ -700,10 +757,16 @@ fn chevron(expanded: bool) -> &'static str {
     if expanded { "▾" } else { "▸" }
 }
 
+/// Element id for an explorer row, stable across expand/collapse because
+/// it is keyed by path rather than by position.
+fn row_id(kind: &str, path: &Path) -> ElementId {
+    SharedString::from(format!("tree-{kind}:{}", path.display())).into()
+}
+
 /// One explorer line, indented by `depth`, with a fixed-width marker column.
-fn tree_row(index: usize, depth: usize, marker: &'static str) -> Stateful<Div> {
+fn tree_row(id: ElementId, depth: usize, marker: &'static str) -> Stateful<Div> {
     div()
-        .id(("tree-row", index))
+        .id(id)
         .flex()
         .items_center()
         .gap_1()
