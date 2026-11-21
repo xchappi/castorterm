@@ -1129,7 +1129,7 @@ impl WorkspaceView {
         let prompt = node
             .board
             .as_ref()
-            .map(|config| board::render_prompt(&config.prompt, task));
+            .map(|config| board::final_prompt(&config.prompt, task, cfg!(windows)));
         div()
             .flex()
             .flex_col()

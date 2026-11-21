@@ -241,14 +241,7 @@ fn neutralize_cmd(text: &str) -> String {
 /// single literal. The prompt (untrusted) never starts with `-`, so the
 /// agent cannot read it as an option.
 pub fn agent_command(command: &str, task_args: &[String], prompt: &str, windows: bool) -> String {
-    let mut prompt = if windows {
-        neutralize_cmd(prompt)
-    } else {
-        prompt.to_string()
-    };
-    if prompt.starts_with('-') {
-        prompt = format!("Task: {prompt}");
-    }
+    let prompt = shell_safe_prompt(prompt, windows);
     let mut line = command.to_string();
     for arg in task_args {
         let arg = arg.replace(PROMPT_PLACEHOLDER, &prompt);
@@ -256,6 +249,30 @@ pub fn agent_command(command: &str, task_args: &[String], prompt: &str, windows:
         line.push_str(&quote_for_shell(&arg, windows));
     }
     line
+}
+
+/// The prompt exactly as the agent receives it: on Windows with `cmd.exe`
+/// metacharacters neutralized and without a trailing backslash (it would
+/// escape the closing quote PowerShell adds), and never starting with `-`.
+/// Idempotent, so it can be shown to the user and then typed.
+pub fn shell_safe_prompt(prompt: &str, windows: bool) -> String {
+    let mut prompt = if windows {
+        neutralize_cmd(prompt)
+    } else {
+        prompt.to_string()
+    };
+    if windows && prompt.ends_with('\\') {
+        prompt.push(' ');
+    }
+    if prompt.starts_with('-') {
+        prompt = format!("Task: {prompt}");
+    }
+    prompt
+}
+
+/// Rendered and shell-safe prompt for `task`; what the task details show.
+pub fn final_prompt(template: &str, task: &Task, windows: bool) -> String {
+    shell_safe_prompt(&render_prompt(template, task), windows)
 }
 
 /// Whether a board should be reloaded: never while a load is running;
@@ -452,6 +469,25 @@ mod tests {
         assert_eq!(
             agent_command("claude", &["{prompt}".into()], "a & b", false),
             "claude 'a & b'"
+        );
+    }
+
+    #[test]
+    fn shown_prompt_is_what_the_agent_receives() {
+        let mut t = task("X-1", Status::Ready);
+        t.title = r#"say "hi" & leave C:\tmp\"#.into();
+        let shown = final_prompt("{title}", &t, true);
+        assert_eq!(shown, "say \u{201D}hi\u{201D} \u{FF06} leave C:\\tmp\\ ");
+        // Typing it changes nothing more: the preview is exact.
+        assert_eq!(shell_safe_prompt(&shown, true), shown);
+        assert_eq!(
+            agent_command(
+                "claude",
+                &["{prompt}".into()],
+                &render_prompt("{title}", &t),
+                true
+            ),
+            agent_command("claude", &["{prompt}".into()], &shown, true)
         );
     }
 
