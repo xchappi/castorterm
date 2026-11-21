@@ -73,6 +73,7 @@ Issues example in [`examples/`](examples/).
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous session |
 | `Ctrl+Shift+E` | Show / hide the file explorer |
 | `Ctrl+Shift+O` | Add folders to the selected workspace |
+| `Ctrl+Shift+P` | Command palette: open any agent in any project, go to a session, add folders |
 
 castorterm exits when the last session closes.
 

@@ -52,7 +52,8 @@ impl WorkspaceView {
         // the gate makes every terminal ignore input even if one regains
         // focus (a click on it, a tab switch).
         self.input_gate.set_paused(true);
-        window.blur();
+        // Without focus GPUI dispatches no keys at all: focus the view.
+        window.focus(&self.focus);
         cx.notify();
     }
 

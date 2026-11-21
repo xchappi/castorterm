@@ -56,7 +56,9 @@ impl NameInput {
                 InputAction::Ignored
             };
         }
-        match key_char {
+        // GPUI gives the space bar no text on Windows.
+        let text = key_char.or((key == "space").then_some(" "));
+        match text {
             Some(text) if self.insert(text) => InputAction::Changed,
             _ => InputAction::Ignored,
         }
@@ -119,6 +121,9 @@ mod tests {
         // AltGr produces characters such as @ on Spanish keyboards.
         assert_eq!(input.handle("2", Some("@"), ALT_GR), InputAction::Changed);
         assert_eq!(input.text, "@");
+        // Space without text (Windows).
+        assert_eq!(input.handle("space", None, NONE), InputAction::Changed);
+        assert_eq!(input.text, "@ ");
     }
 
     #[test]
