@@ -55,7 +55,8 @@ Build your workspaces from the window, no config editing needed:
 Every change is saved to your config file, keeping your comments.
 
 castorterm reopens the sessions you had open when you start it again (same
-projects, same agents, the same tab active). Agents with `resume_args` in the
+projects, same agents, the same tab active), in a window of the same size
+and place. Agents with `resume_args` in the
 config (for example `claude --continue`) pick up their last conversation.
 Turn it off with `restore_sessions = false` under `[ui]`.
 

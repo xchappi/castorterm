@@ -9,7 +9,7 @@ use futures::channel::mpsc;
 use gpui::{
     AnyElement, BoxShadow, ClickEvent, Context, Div, ElementId, Entity, ExternalPaths, FocusHandle,
     Focusable as _, FontWeight, KeyDownEvent, Rgba, SharedString, Stateful, Subscription, Window,
-    div, linear_color_stop, linear_gradient, point, prelude::*, px, rgb, rgba,
+    WindowBounds, div, linear_color_stop, linear_gradient, point, prelude::*, px, rgb, rgba,
 };
 
 mod command_palette;
@@ -22,7 +22,7 @@ use crate::agent_status::{self, AgentStatus};
 use crate::board::{self, Status, Task as BoardTask};
 use crate::git_remote;
 use crate::provider;
-use crate::restore::{self, SavedSession, SavedState};
+use crate::restore::{self, SavedSession, SavedState, SavedWindow};
 
 use crate::config::Settings;
 use crate::files::{self, FileTree, Row, path_for_terminal};
@@ -127,6 +127,9 @@ pub struct WorkspaceView {
     state_path: Option<PathBuf>,
     /// Last state written, to skip identical writes.
     saved_state: Option<SavedState>,
+    /// Current window geometry, saved with the sessions (not on every move).
+    window_geometry: Option<SavedWindow>,
+    _bounds_subscription: Option<Subscription>,
     /// Command palette, while open.
     palette: Option<Palette>,
     /// Start agents on tasks in a git worktree of their own.
@@ -216,6 +219,8 @@ impl WorkspaceView {
             shown_title: String::new(),
             state_path: None,
             saved_state: None,
+            window_geometry: Some(geometry(window.window_bounds())),
+            _bounds_subscription: None,
             palette: None,
             focus: cx.focus_handle(),
             task_worktree: false,
@@ -247,6 +252,11 @@ impl WorkspaceView {
         if !(restore_sessions && this.restore_from(state_path.as_deref(), window, cx)) {
             this.launch(initial_project, SHELL_LAUNCHER, window, cx);
         }
+        // Track moves and resizes in memory; written with the next save and
+        // when the window closes.
+        this._bounds_subscription = Some(cx.observe_window_bounds(window, |this, window, _| {
+            this.window_geometry = Some(geometry(window.window_bounds()));
+        }));
         // Saving starts once the startup sessions are open; with restoring
         // off the file is never touched.
         if restore_sessions {
@@ -506,7 +516,10 @@ impl WorkspaceView {
             return;
         };
         let active = self.tabs.active_id();
-        let mut state = SavedState::default();
+        let mut state = SavedState {
+            window: self.window_geometry,
+            ..SavedState::default()
+        };
         for (index, tab) in self.tabs.iter().enumerate() {
             if Some(tab.id) == active {
                 state.active = Some(index);
@@ -521,7 +534,8 @@ impl WorkspaceView {
         }
         // Best effort: a failure only means starting with one shell (or
         // reopening sessions the user closed), so it is reported but not fatal.
-        let result = if state.sessions.is_empty() {
+        // Without sessions only the window geometry is kept.
+        let result = if state.sessions.is_empty() && state.window.is_none() {
             restore::clear(&path)
         } else {
             restore::save(&path, &state)
@@ -1935,6 +1949,18 @@ fn launcher_button(id: impl Into<ElementId>, text: String, color: u32) -> Statef
         .child(SharedString::from(text))
 }
 
+/// Saved form of a window's bounds; full screen is restored as maximized.
+fn geometry(bounds: WindowBounds) -> SavedWindow {
+    let rect = bounds.get_bounds();
+    SavedWindow {
+        x: rect.origin.x.into(),
+        y: rect.origin.y.into(),
+        width: rect.size.width.into(),
+        height: rect.size.height.into(),
+        maximized: !matches!(bounds, WindowBounds::Windowed(_)),
+    }
+}
+
 /// Small label with what an agent is doing; waiting stands out.
 fn status_badge(status: AgentStatus) -> Div {
     let (text, color) = match status {
@@ -1970,6 +1996,8 @@ impl Drop for WorkspaceView {
     /// Closing the window does not close the sessions one by one: remove
     /// their status files here.
     fn drop(&mut self) {
+        // The last geometry (moves and resizes are not written as they happen).
+        self.save_state();
         for tab in self.tabs.iter() {
             if let Some(file) = &tab.handle.status_file {
                 let _ = std::fs::remove_file(file);

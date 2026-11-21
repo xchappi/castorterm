@@ -28,8 +28,8 @@ mod workspace_view;
 mod worktree;
 
 use gpui::{
-    App, AppContext as _, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px,
-    size,
+    App, AppContext as _, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point,
+    px, size,
 };
 
 use crate::workspace_view::WorkspaceView;
@@ -90,14 +90,45 @@ fn main() {
     });
 }
 
+/// Geometry of the last run, if it is plausible and still on a screen (a
+/// monitor may have been unplugged since).
+fn saved_window_bounds(settings: &config::Settings, cx: &App) -> Option<WindowBounds> {
+    let path = settings
+        .config_path
+        .as_ref()?
+        .parent()?
+        .join(restore::FILE_NAME);
+    let saved = restore::load(&path)
+        .window
+        .filter(restore::SavedWindow::is_sane)?;
+    let bounds = Bounds::new(
+        point(px(saved.x), px(saved.y)),
+        size(px(saved.width), px(saved.height)),
+    );
+    let visible = cx
+        .displays()
+        .iter()
+        .any(|display| display.bounds().intersects(&bounds));
+    if !visible {
+        return None;
+    }
+    Some(if saved.maximized {
+        WindowBounds::Maximized(bounds)
+    } else {
+        WindowBounds::Windowed(bounds)
+    })
+}
+
 fn open_workspace_window(
     settings: config::Settings,
     launch_dir: std::path::PathBuf,
     cx: &mut App,
 ) -> anyhow::Result<()> {
-    let bounds = Bounds::centered(None, size(px(1360.0), px(820.0)), cx);
+    let window_bounds = saved_window_bounds(&settings, cx).unwrap_or_else(|| {
+        WindowBounds::Windowed(Bounds::centered(None, size(px(1360.0), px(820.0)), cx))
+    });
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_bounds: Some(window_bounds),
         titlebar: Some(TitlebarOptions {
             title: Some("castorterm".into()),
             ..Default::default()

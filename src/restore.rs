@@ -27,13 +27,47 @@ pub struct SavedSession {
     pub launcher: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SavedState {
     #[serde(default)]
     pub sessions: Vec<SavedSession>,
     /// Index of the active session in `sessions`.
     #[serde(default)]
     pub active: Option<usize>,
+    /// Window geometry of the last run.
+    #[serde(default)]
+    pub window: Option<SavedWindow>,
+}
+
+/// Window position and size (logical pixels); `maximized` restores it
+/// maximized, with these bounds for when it is restored down.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedWindow {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    #[serde(default)]
+    pub maximized: bool,
+}
+
+impl SavedWindow {
+    /// Smallest window worth restoring; smaller ones fall back to the default.
+    const MIN: f32 = 400.0;
+    const MAX: f32 = 20_000.0;
+
+    /// Plausible values (a hand-edited or corrupt file never makes an
+    /// unusable window).
+    pub fn is_sane(&self) -> bool {
+        let finite = [self.x, self.y, self.width, self.height]
+            .iter()
+            .all(|v| v.is_finite());
+        finite
+            && (Self::MIN..=Self::MAX).contains(&self.width)
+            && (Self::MIN * 0.75..=Self::MAX).contains(&self.height)
+            && self.x.abs() <= Self::MAX * 4.0
+            && self.y.abs() <= Self::MAX * 4.0
+    }
 }
 
 /// Reads the state; a missing, oversized or unreadable file is empty.
@@ -175,6 +209,7 @@ mod tests {
                 saved(&dir.join("b"), "Claude Code"),
             ],
             active: Some(3),
+            window: None,
         };
         let (sessions, active) = plan(&state, &tree, &launchers);
         assert_eq!(sessions, vec![(0, 0), (1, 1)]);
@@ -191,6 +226,7 @@ mod tests {
                 .map(|i| saved(&dir.join(if i == 0 { "a" } else { "b" }), "Shell"))
                 .collect(),
             active: Some(0),
+            window: None,
         };
         let (sessions, active) = plan(&state, &tree, &launchers);
         assert_eq!(sessions.len(), MAX_SESSIONS);
@@ -210,6 +246,38 @@ mod tests {
     }
 
     #[test]
+    fn window_geometry_sanity_and_round_trip() {
+        let ok = SavedWindow {
+            x: -1200.0,
+            y: 40.0,
+            width: 1360.0,
+            height: 820.0,
+            maximized: true,
+        };
+        assert!(ok.is_sane());
+        for bad in [
+            SavedWindow { width: 10.0, ..ok },
+            SavedWindow {
+                height: f32::NAN,
+                ..ok
+            },
+            SavedWindow { x: 1e9, ..ok },
+            SavedWindow { width: 1e7, ..ok },
+        ] {
+            assert!(!bad.is_sane(), "{bad:?}");
+        }
+        // Old files without a window still load.
+        let old: SavedState = serde_json::from_str(r#"{"sessions":[],"active":null}"#).unwrap();
+        assert_eq!(old.window, None);
+        let state = SavedState {
+            window: Some(ok),
+            ..SavedState::default()
+        };
+        let text = serde_json::to_string(&state).unwrap();
+        assert_eq!(serde_json::from_str::<SavedState>(&text).unwrap(), state);
+    }
+
+    #[test]
     fn save_load_and_bad_files() {
         let dir = std::env::temp_dir().join(format!("castorterm-restore-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -218,6 +286,7 @@ mod tests {
         let state = SavedState {
             sessions: vec![saved(Path::new("/p"), "Shell")],
             active: Some(0),
+            window: None,
         };
         save(&path, &state).unwrap();
         assert_eq!(load(&path), state);
