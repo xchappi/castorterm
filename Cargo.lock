@@ -774,6 +774,7 @@ dependencies = [
  "futures",
  "gpui",
  "libc",
+ "polling",
  "raw-window-handle",
  "serde",
  "serde_json",

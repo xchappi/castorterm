@@ -152,6 +152,8 @@ pub struct WorkspaceView {
     next_status_key: u64,
     /// Last status reported by the agent of each session.
     statuses: HashMap<SessionId, AgentStatus>,
+    /// Working directory each shell last reported (OSC 7 / OSC 9;9).
+    cwds: HashMap<SessionId, PathBuf>,
     statuses_loading: bool,
     /// An agent started waiting since the last frame: flash the taskbar if
     /// the window is in the background.
@@ -243,6 +245,7 @@ impl WorkspaceView {
             status_dir: None,
             next_status_key: 0,
             statuses: HashMap::new(),
+            cwds: HashMap::new(),
             statuses_loading: false,
             attention_pending: false,
             _status_timer: status_timer,
@@ -379,6 +382,15 @@ impl WorkspaceView {
             TerminalEvent::Exited => {
                 if let Some(id) = self.tabs.find(|s| s.view == *emitter) {
                     self.close(id, window, cx);
+                }
+            }
+            TerminalEvent::Cwd(dir) => {
+                if std::env::var_os("CASTORTERM_DEBUG_CWD").is_some() {
+                    eprintln!("DEBUGCWD {dir}");
+                }
+                if let Some(id) = self.tabs.find(|s| s.view == *emitter) {
+                    self.cwds.insert(id, PathBuf::from(dir));
+                    cx.notify();
                 }
             }
         }
