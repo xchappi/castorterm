@@ -20,6 +20,8 @@ pub const TITLE_PREFIX: &str = "castorterm:cwd:";
 
 /// Longest OSC payload kept; longer ones are dropped.
 const MAX_OSC: usize = 4096;
+/// Longest directory accepted (it only feeds a label).
+const MAX_CWD_CHARS: usize = 1024;
 
 #[derive(Debug, Default)]
 enum State {
@@ -112,7 +114,10 @@ pub fn cwd_from_osc(payload: &str) -> Option<String> {
             .or_else(|| payload.strip_prefix("2;"))?;
         title.strip_prefix(TITLE_PREFIX)?.to_string()
     };
-    let clean = !path.is_empty() && !path.chars().any(char::is_control);
+    // Shown in the UI: no control or invisible (bidi) characters, bounded.
+    let clean = !path.is_empty()
+        && path.chars().count() <= MAX_CWD_CHARS
+        && !path.chars().any(crate::board::is_hidden);
     clean.then_some(path)
 }
 
@@ -122,8 +127,11 @@ fn percent_decode(text: &str) -> Option<String> {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
-            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
+            let hex = bytes.get(i + 1..i + 3)?;
+            if !hex.iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            out.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
             i += 3;
         } else {
             out.push(bytes[i]);
@@ -137,24 +145,26 @@ type Reader = <tty::Pty as EventedReadWrite>::Reader;
 
 /// Reader that passes bytes through unchanged and scans them.
 pub struct TapReader {
-    /// The wrapped PTY's reader. Points into `TapPty::inner`, a `Box` that
-    /// is never moved or dropped while this reader exists (both live in the
-    /// same `TapPty`, and `inner` is declared after `reader` so it drops
-    /// last).
+    /// The wrapped PTY's reader, inside `TapPty::inner`. Re-derived by
+    /// `TapPty::reader` right before every use (the event loop calls
+    /// `reader()` and then `read()` on what it returns), so it never
+    /// outlives a reborrow of `inner`.
     inner: *mut Reader,
     scanner: OscScanner,
     on_cwd: Box<dyn FnMut(String) + Send>,
 }
 
-// SAFETY: the pointer is only used from the thread that owns the `TapPty`
-// (the PTY event loop), exactly like the reader it points to.
+// SAFETY: the pointer is only dereferenced through `TapPty`, from the
+// thread that owns it (the PTY event loop), like the reader it points to.
 unsafe impl Send for TapReader {}
 
 impl Read for TapReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // SAFETY: see `inner`.
+        // SAFETY: see `inner`: freshly derived from `TapPty::inner` by the
+        // `reader()` call that returned `self`.
         let n = unsafe { (*self.inner).read(buf)? };
-        for cwd in self.scanner.feed(&buf[..n]) {
+        // Only the last report of a chunk matters.
+        if let Some(cwd) = self.scanner.feed(&buf[..n]).pop() {
             (self.on_cwd)(cwd);
         }
         Ok(n)
@@ -205,6 +215,7 @@ impl EventedReadWrite for TapPty {
     }
 
     fn reader(&mut self) -> &mut TapReader {
+        self.reader.inner = self.inner.reader();
         &mut self.reader
     }
 
@@ -257,6 +268,12 @@ mod tests {
         assert_eq!(cwd_from_osc("7;http://x/y"), None);
         assert_eq!(cwd_from_osc("7;file://host/a%0Ab"), None);
         assert_eq!(cwd_from_osc("7;file://host/a%zz"), None);
+        assert_eq!(cwd_from_osc("7;file://host/a%+1"), None);
+        assert_eq!(cwd_from_osc("9;9;a\u{202E}b"), None);
+        assert_eq!(
+            cwd_from_osc(&format!("9;9;{}", "x".repeat(MAX_CWD_CHARS + 1))),
+            None
+        );
     }
 
     #[test]
@@ -274,5 +291,8 @@ mod tests {
         big.push(0x07);
         assert!(s.feed(&big).is_empty());
         assert_eq!(s.feed(b"\x1b]7;file://h/ok\x07"), vec!["/ok".to_string()]);
+        // ST split across reads.
+        assert!(s.feed(b"\x1b]9;9;D:\\y\x1b").is_empty());
+        assert_eq!(s.feed(b"\\"), vec!["D:\\y".to_string()]);
     }
 }

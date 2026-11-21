@@ -23,11 +23,15 @@ impl ShellSpec {
 /// (oh-my-posh and others included) so that, after it runs, the window title
 /// reports the location to castorterm (see `pty_tap::TITLE_PREFIX`; ConPTY
 /// forwards titles but drops OSC 7).
-const POWERSHELL_INTEGRATION: &str = r#"$global:__castortermPrompt = $function:prompt
+const POWERSHELL_INTEGRATION: &str = r#"if (-not (Get-Variable -Name __castortermPrompt -Scope Global -ErrorAction SilentlyContinue)) {
+    $global:__castortermPrompt = $function:prompt
+}
 function global:prompt {
     $text = & $global:__castortermPrompt
-    $Host.UI.RawUI.WindowTitle = 'castorterm:cwd:' + $executionContext.SessionState.Path.CurrentLocation.ProviderPath
-    $text
+    $title = 'castorterm:cwd:' + $executionContext.SessionState.Path.CurrentLocation.ProviderPath
+    $Host.UI.RawUI.WindowTitle = $title
+    # Also as the last thing written, after any title the prompt sets itself.
+    "$text" + [char]27 + ']0;' + $title + [char]7
 }"#;
 
 /// `-EncodedCommand` value for the integration: base64 of UTF-16LE, so no
@@ -128,6 +132,28 @@ pub fn quote_windows_program(program: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Test-only decoder for the encoder above.
+    fn decode_base64(text: &str) -> Vec<u8> {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let values: Vec<u32> = text
+            .bytes()
+            .filter(|&b| b != b'=')
+            .map(|b| TABLE.iter().position(|&t| t == b).unwrap() as u32)
+            .collect();
+        let mut out = Vec::new();
+        for chunk in values.chunks(4) {
+            let n = chunk
+                .iter()
+                .enumerate()
+                .fold(0, |acc, (i, v)| acc | v << (18 - 6 * i));
+            for k in 0..chunk.len().saturating_sub(1) {
+                out.push((n >> (16 - 8 * k)) as u8);
+            }
+        }
+        out
+    }
+
     #[test]
     fn base64_matches_known_values() {
         assert_eq!(super::base64(b""), "");
@@ -149,6 +175,15 @@ mod tests {
         assert_eq!(c[1].program, "powershell.exe");
         assert_eq!(&c[0].args[..3], ["-NoLogo", "-NoExit", "-EncodedCommand"]);
         assert_eq!(c[0].args[3], powershell_integration());
+        // The encoded script decodes back to the integration.
+        let decoded = decode_base64(&c[0].args[3]);
+        let utf16: Vec<u16> = decoded
+            .chunks(2)
+            .map(|p| u16::from_le_bytes([p[0], p[1]]))
+            .collect();
+        let script = String::from_utf16(&utf16).unwrap();
+        assert!(script.contains("castorterm:cwd:"));
+        assert!(script.contains("__castortermPrompt"));
         assert_eq!(c[1].args, c[0].args);
     }
 
