@@ -27,16 +27,18 @@ task_args = ["{prompt}"]
 name = "OpenCode"
 command = "opencode"
 
-# Workspaces group projects in the sidebar. Paths must be absolute; a
-# leading ~ is expanded to your home directory.
 # Task providers for the Quests tab (see docs/providers.md).
 [[providers]]
 name = "github"
 command = "github_issues_provider"
 
+# Workspaces group projects in the sidebar. Paths must be absolute; a
+# leading ~ is expanded to your home directory.
+
 [[workspaces]]
 name = "CastorLabs"
-board = { provider = "github", filter = "xchappi/castorterm", prompt = "Work on task {id}: {title}", refresh_secs = 60 }
+# The board lists the tasks of every project below that has a `repo`.
+board = { provider = "github", prompt = "Work on task {id}: {title}", refresh_secs = 60 }
 
 [[workspaces.projects]]
 name = "castorterm"

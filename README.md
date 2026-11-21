@@ -40,8 +40,8 @@ The window has three columns:
 - **Sessions** (right): tabs and the active terminal.
 
 The middle column also has a **Quests** tab: the task board of the
-workspace, loaded from an external **provider** (GitHub Issues, your own
-tracker...). Select a task to open its link or start an agent on it in the
+workspace, with the tasks of all its projects together, loaded from an
+external **provider** (GitHub Issues, your own tracker...). Select a task to open its link or start an agent on it in the
 right project, with the task as its prompt. Providers are small programs
 that print JSON; see [docs/providers.md](docs/providers.md) and the GitHub
 Issues example in [`examples/`](examples/).

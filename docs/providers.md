@@ -25,15 +25,24 @@ task_args = ["{prompt}"]            # how to pass the task prompt to the agent
 
 [[workspaces]]
 name = "My workspace"
-board = { provider = "github", filter = "owner/repo", prompt = "Work on task {id}: {title}", refresh_secs = 60 }
+board = { provider = "github", prompt = "Work on task {id}: {title}", refresh_secs = 60 }
 
 [[workspaces.projects]]
 name = "app"
 path = "~/src/app"
-repo = "owner/repo"                 # tasks whose `project` is this go here
+repo = "owner/app"                  # passed to the provider; its tasks open here
+
+[[workspaces.projects]]
+name = "api"
+path = "~/src/api"
+repo = "owner/api"
 ```
 
-- `filter` is opaque to castorterm: it is passed to the provider unchanged.
+- The board shows the tasks of every project of the workspace: each distinct
+  `repo` is passed to the provider as `--project`. A `repo` may only contain
+  ASCII letters, digits and `. _ - /`, and must not start with `-`.
+- `filter` is optional and opaque to castorterm: it is passed to the provider
+  unchanged, to narrow the listing further (labels, assignee...).
 - `prompt` accepts `{id}`, `{title}` and `{url}`; the default is
   `Work on task {id}: {title}`.
 - `refresh_secs` defaults to 60 and cannot be lower than 15.
@@ -45,9 +54,14 @@ repo = "owner/repo"                 # tasks whose `project` is this go here
 ### Invocation
 
 ```
-<command> <args...> list --filter <filter>
+<command> <args...> list --filter <filter> [--project <repo>]...
 ```
 
+- `--project <repo>` is repeated once per distinct `repo` of the workspace's
+  projects, in config order (none when no project has a `repo`). The filter
+  is always passed, possibly empty. When `--project` is given, return the
+  tasks of all those projects and set each task's `project` so castorterm
+  knows where it belongs.
 - Run directly, without a shell. Standard input is closed.
 - Working directory: the directory that contains the provider executable,
   never a project (projects may be untrusted clones, and Windows searches
@@ -81,11 +95,11 @@ UTF-8 JSON on standard output:
 
 | Field | Required | Notes |
 |---|---|---|
-| `id` | yes | Shown as is; usually the tracker key. No whitespace or control characters; must be unique. |
+| `id` | yes | Shown as is; usually the tracker key. No whitespace or control characters; must be unique across all projects. |
 | `title` | yes | Control and invisible formatting characters are replaced by spaces; cut at 300 characters. |
 | `status` | yes | One of `backlog`, `ready`, `in_progress`, `review`, `done`. Omit tasks in other states (e.g. cancelled). |
-| `priority` | no | Free text; `P0`-`P3` get colours. |
-| `project` | no | Matched to a project's `repo`, then to its `name` (case-insensitive). |
+| `priority` | no | Free text, cut at 64 characters; `P0`-`P3` get colours. |
+| `project` | no | Matched to a project's `repo`, then to its `name` (case-insensitive); cut at 64 characters. |
 | `url` | no | Only `http` and `https` links are shown. |
 
 Tasks with missing fields, unknown statuses or duplicate ids are skipped and

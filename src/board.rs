@@ -16,6 +16,8 @@ pub const PROTOCOL_VERSION: u64 = 1;
 pub const MAX_TASKS: usize = 500;
 /// Longer titles are cut (in characters).
 pub const MAX_TITLE_CHARS: usize = 300;
+/// Cap for short labels from the provider (`priority`, `project`).
+pub const MAX_LABEL_CHARS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Status {
@@ -137,13 +139,18 @@ fn validate(raw: RawTask) -> Option<Task> {
         id,
         title,
         status: Status::parse(raw.status.trim())?,
-        priority: raw.priority.map(|p| clean(&p)).filter(|p| !p.is_empty()),
-        project: raw.project.map(|p| clean(&p)).filter(|p| !p.is_empty()),
+        priority: raw.priority.map(|p| label(&p)).filter(|p| !p.is_empty()),
+        project: raw.project.map(|p| label(&p)).filter(|p| !p.is_empty()),
         url: raw
             .url
             .map(|u| u.trim().to_string())
             .filter(|u| is_web_link(u)),
     })
+}
+
+/// Cleaned and capped short label.
+fn label(text: &str) -> String {
+    truncate(&clean(text), MAX_LABEL_CHARS)
 }
 
 /// Control characters and invisible formatting characters (bidi overrides,
@@ -205,6 +212,18 @@ pub fn match_project<'a>(
                 .find(|(_, name, _)| name.eq_ignore_ascii_case(wanted))
         })
         .map(|(index, _, _)| index)
+}
+
+/// Distinct repositories of a workspace's projects, in config order and
+/// ignoring ASCII case; passed to the provider as `--project` arguments.
+pub fn workspace_repos<'a>(repos: impl IntoIterator<Item = Option<&'a str>>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for repo in repos.into_iter().flatten() {
+        if !out.iter().any(|r| r.eq_ignore_ascii_case(repo)) {
+            out.push(repo.to_string());
+        }
+    }
+    out
 }
 
 /// Fills `{id}`, `{title}` and `{url}` in a prompt template.
@@ -382,6 +401,17 @@ mod tests {
     }
 
     #[test]
+    fn labels_are_capped() {
+        let long = "p".repeat(MAX_LABEL_CHARS * 3);
+        let json = format!(
+            "{{\"version\":1,\"tasks\":[{{\"id\":\"X\",\"title\":\"t\",\"status\":\"ready\",\"priority\":\"{long}\",\"project\":\"{long}\"}}]}}"
+        );
+        let t = &parse_listing(&json).unwrap().tasks[0];
+        assert!(t.project.as_ref().unwrap().chars().count() <= MAX_LABEL_CHARS + 1);
+        assert!(t.priority.as_ref().unwrap().chars().count() <= MAX_LABEL_CHARS + 1);
+    }
+
+    #[test]
     fn only_web_links() {
         assert!(is_web_link("https://a.b/c"));
         assert!(is_web_link("HTTP://a.b"));
@@ -422,6 +452,15 @@ mod tests {
         assert_eq!(match_project(Some("stack"), iter()), Some(2));
         assert_eq!(match_project(Some("unknown"), iter()), None);
         assert_eq!(match_project(None, iter()), None);
+    }
+
+    #[test]
+    fn workspace_repos_are_distinct_and_ordered() {
+        assert_eq!(
+            workspace_repos([Some("acme/app"), None, Some("acme/api"), Some("ACME/App")]),
+            vec!["acme/app".to_string(), "acme/api".to_string()]
+        );
+        assert!(workspace_repos([None, None]).is_empty());
     }
 
     #[test]

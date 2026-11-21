@@ -125,7 +125,8 @@ pub struct Board {
 pub struct Project {
     pub name: String,
     pub path: PathBuf,
-    /// Repository identifier used to match tracker tasks (e.g. `owner/repo`).
+    /// Repository identifier (e.g. `owner/repo`): passed to the board
+    /// provider as `--project` and used to match tasks to this project.
     pub repo: Option<String>,
 }
 
@@ -341,14 +342,21 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
                 ));
                 continue;
             }
+            let repo = project.repo.map(|r| r.trim().to_string());
+            let repo = match repo {
+                Some(r) if !valid_repo(&r) => {
+                    settings.messages.push(format!(
+                        "Project '{name}': repo {r:?} ignored, use only letters, digits and . _ - / (not starting with -)"
+                    ));
+                    None
+                }
+                repo => repo,
+            };
             match expand_home(project.path.trim(), home) {
                 Some(path) if path.is_absolute() => projects.push(Project {
                     name: name.into(),
                     path,
-                    repo: project
-                        .repo
-                        .map(|r| r.trim().to_string())
-                        .filter(|r| valid_text(r)),
+                    repo,
                 }),
                 _ => settings.messages.push(format!(
                     "Project '{}' skipped: path '{}' must be absolute",
@@ -406,6 +414,18 @@ fn parse_board(
         prompt,
         refresh_secs,
     })
+}
+
+/// A repository identifier is passed to providers as a `--project` value.
+/// Allow list: ASCII letters, digits and `. _ - /`, not starting with `-`.
+/// Nothing a shell or `cmd.exe` interprets (a `.cmd` provider re-parses its
+/// arguments), and nothing a provider could take for a flag.
+fn valid_repo(repo: &str) -> bool {
+    !repo.is_empty()
+        && !repo.starts_with('-')
+        && repo
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
 }
 
 /// Non-empty and free of control characters: commands are typed into the
@@ -652,6 +672,14 @@ mod tests {
             name = "p"
             path = "/p"
             repo = "x/p"
+            [[workspaces.projects]]
+            name = "flag"
+            path = "/p"
+            repo = "--all"
+            [[workspaces.projects]]
+            name = "spaced"
+            path = "/p"
+            repo = "x/a b"
 
             [[workspaces]]
             name = "V"
@@ -676,10 +704,27 @@ mod tests {
         assert_eq!(board.prompt, DEFAULT_PROMPT);
         assert_eq!(board.refresh_secs, MIN_REFRESH_SECS);
         assert_eq!(s.workspaces[0].projects[0].repo.as_deref(), Some("x/p"));
+        // Unsafe repos are dropped but the projects are kept.
+        assert_eq!(s.workspaces[0].projects.len(), 3);
+        assert_eq!(s.workspaces[0].projects[1].repo, None);
+        assert_eq!(s.workspaces[0].projects[2].repo, None);
         assert_eq!(s.workspaces[1].board, None);
-        // Bad task_args, duplicate provider, low refresh and unknown
-        // provider are reported.
-        assert_eq!(s.messages.len(), 4, "{:?}", s.messages);
+        // Bad task_args, duplicate provider, low refresh, two unsafe repos
+        // and unknown provider are reported.
+        assert_eq!(s.messages.len(), 6, "{:?}", s.messages);
+    }
+
+    #[test]
+    fn repo_allow_list() {
+        for ok in ["owner/repo", "a.b_c-d/E9", "CL"] {
+            assert!(valid_repo(ok), "{ok}");
+        }
+        for bad in [
+            "", "-x", "--all", "a b", "a\nb", "a&b", "a%PATH%", "a\"b", "a^b", "a!b", "a|b", "a<b",
+            "a>b", "a;b", "a'b", "a(b)", "a`b", "a$b", "rëpo",
+        ] {
+            assert!(!valid_repo(bad), "{bad:?}");
+        }
     }
 
     #[test]
