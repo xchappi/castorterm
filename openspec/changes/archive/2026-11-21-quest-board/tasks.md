@@ -23,4 +23,4 @@
 - [x] 5.1 `docs/providers.md` (contract v1) and README/config example sections
 - [x] 5.2 `examples/github_issues_provider.rs` using `gh issue list --json`
 - [x] 5.3 Screenshots on Windows with the example provider: board, refresh, start an agent on a task
-- [ ] 5.4 CI green on Windows, macOS and Linux
+- [x] 5.4 CI green on Windows, macOS and Linux
