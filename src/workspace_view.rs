@@ -31,7 +31,7 @@ use crate::theme::{
     priority_color, with_alpha,
 };
 use crate::tree::{Launcher, ProjectTree, SHELL_LAUNCHER, launchers};
-use crate::view::{TerminalEvent, TerminalStyle, TerminalView};
+use crate::view::{InputGate, TerminalEvent, TerminalStyle, TerminalView};
 
 const SIDEBAR_WIDTH: f32 = 220.0;
 const EXPLORER_WIDTH: f32 = 260.0;
@@ -103,6 +103,8 @@ pub struct WorkspaceView {
     editor: Option<NameEditor>,
     /// Result of the last workspace change that could not be saved.
     notice: Option<String>,
+    /// Paused while the name field owns the keyboard.
+    input_gate: InputGate,
 }
 
 impl WorkspaceView {
@@ -151,6 +153,7 @@ impl WorkspaceView {
             home: settings.home,
             editor: None,
             notice: None,
+            input_gate: InputGate::default(),
         };
         if let Some(node) = this.tree.projects.get(initial_project) {
             this.expand_dir(node.path.clone(), cx);
@@ -210,7 +213,8 @@ impl WorkspaceView {
         }
 
         let style = self.style.clone();
-        let view = cx.new(|cx| TerminalView::new(session, events_rx, style, cx));
+        let gate = self.input_gate.clone();
+        let view = cx.new(|cx| TerminalView::new(session, events_rx, style, gate, cx));
         let subscription = cx.subscribe_in(&view, window, Self::on_terminal_event);
         self.tabs.open(
             project,
@@ -274,8 +278,11 @@ impl WorkspaceView {
             window.set_window_title("castorterm");
             return;
         };
-        let handle = tab.handle.view.read(cx).focus_handle(cx);
-        window.focus(&handle);
+        // The name field keeps the keyboard until it closes.
+        if self.editor.is_none() {
+            let handle = tab.handle.view.read(cx).focus_handle(cx);
+            window.focus(&handle);
+        }
         let name = &self.tree.projects[tab.project].name;
         window.set_window_title(&format!("{} · {name} — castorterm", tab.label));
     }

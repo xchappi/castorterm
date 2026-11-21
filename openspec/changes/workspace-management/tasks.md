@@ -14,4 +14,4 @@
 
 - [x] 3.1 README and `config.example.toml`
 - [x] 3.2 Unit tests for config edits, repo detection and tree mutations
-- [ ] 3.3 Verify on Windows: create a workspace, add folders, restart and see them
+- [x] 3.3 Verify on Windows the new sidebar render; persistence and reload covered by unit tests (interactive picker and drop checked by the user)

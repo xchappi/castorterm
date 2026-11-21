@@ -32,7 +32,9 @@ to workspaces and projects by index.
 - **Names identify workspaces.** The config loader skips duplicate workspace names and the
   implicit workspace takes a free name (`Local 2`...), so saving by name is unambiguous. Removals
   in the file affect only the first match.
-- **Folders that are symlinks or junctions** are accepted like any directory: the user chose them.
+- **Links.** A folder the user picks or drops may itself be a symlink or junction (their choice), but
+  nothing inside it is read through a link: below the project folder every component of a git
+  file path must be a plain directory (no symlink, no reparse point, no `..`).
 - **Text input.** A minimal inline field handled in the existing key capture (characters,
   Backspace, Enter, Escape, Ctrl+V); while it is open the terminal loses focus, so neither key
   events nor text input reach it. GPUI has no

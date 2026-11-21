@@ -48,8 +48,10 @@ impl WorkspaceView {
             input: NameInput::new(text),
             error: None,
         });
-        // Without focus the terminal gets no text input; keys still reach
-        // the root capture handler, which feeds the field.
+        // Keys still reach the root capture handler, which feeds the field;
+        // the gate makes every terminal ignore input even if one regains
+        // focus (a click on it, a tab switch).
+        self.input_gate.set_paused(true);
         window.blur();
         cx.notify();
     }
@@ -57,6 +59,7 @@ impl WorkspaceView {
     /// Closes the name field and gives the keyboard back to the terminal.
     pub(super) fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.editor = None;
+        self.input_gate.set_paused(false);
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -308,6 +311,7 @@ impl WorkspaceView {
             Some(EditTarget::Rename(_))
         ) {
             self.editor = None;
+            self.input_gate.set_paused(false);
         }
         if selected_here {
             self.select_fallback(cx);

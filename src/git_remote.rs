@@ -13,11 +13,11 @@ const MAX_GIT_FILE: u64 = 1 << 20;
 /// Reads git's files directly: no `git` process is started.
 ///
 /// The folder may be an untrusted clone, so redirections (`gitdir:`,
-/// `commondir`, symlinks) are only followed to local paths: opening a UNC
-/// path such as `\host\share` makes Windows send the user's credentials
-/// to that host.
+/// `commondir`) are only followed to local paths, and nothing is read
+/// through a symlink or junction inside the folder: opening a UNC path such
+/// as `\\host\share` makes Windows send the user's credentials to that host.
 pub fn detect_repo(dir: &Path) -> Option<String> {
-    let config = read_local(&git_dir(dir)?.join("config"))?;
+    let config = read_local(dir, &git_dir(dir)?.join("config"))?;
     let url = origin_url(&config)?;
     repo_from_url(&url).filter(|r| valid_repo(r))
 }
@@ -31,14 +31,14 @@ fn git_dir(dir: &Path) -> Option<PathBuf> {
     let git_dir = if meta.is_dir() {
         dot_git
     } else if meta.is_file() {
-        let text = read_local(&dot_git)?;
+        let text = read_local(dir, &dot_git)?;
         let target = text.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim();
         local(dir.join(target))?
     } else {
         // A symlinked .git could point anywhere.
         return None;
     };
-    match read_local(&git_dir.join("commondir")) {
+    match read_local(dir, &git_dir.join("commondir")) {
         Some(common) => local(git_dir.join(common.trim())),
         None => Some(git_dir),
     }
@@ -59,11 +59,12 @@ fn local(path: PathBuf) -> Option<PathBuf> {
     }
 }
 
-/// Contents of a regular local file of at most [`MAX_GIT_FILE`] bytes,
-/// without following symlinks.
-fn read_local(path: &Path) -> Option<String> {
+/// Contents of a regular local file of at most [`MAX_GIT_FILE`] bytes. Under
+/// `base` (the folder the user chose, whose content may be untrusted) no
+/// component may be a symlink or junction.
+fn read_local(base: &Path, path: &Path) -> Option<String> {
     let path = local(path.to_path_buf())?;
-    if !std::fs::symlink_metadata(&path).ok()?.is_file() {
+    if goes_through_link(base, &path) || !std::fs::symlink_metadata(&path).ok()?.is_file() {
         return None;
     }
     let mut text = String::new();
@@ -73,6 +74,42 @@ fn read_local(path: &Path) -> Option<String> {
         .read_to_string(&mut text)
         .ok()?;
     Some(text)
+}
+
+/// Whether `path`, below `base`, passes through a symlink or a junction (or
+/// uses `..`, which could step back through one). Paths outside `base` are
+/// the user's own and only checked for being local.
+fn goes_through_link(base: &Path, path: &Path) -> bool {
+    let Ok(rest) = path.strip_prefix(base) else {
+        return false;
+    };
+    let mut current = base.to_path_buf();
+    for component in rest.components() {
+        let Component::Normal(part) = component else {
+            return true;
+        };
+        current.push(part);
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if is_link(&meta) => return true,
+            Ok(_) => {}
+            // Missing: nothing to follow; the read itself will fail.
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+fn is_link(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        // Junctions and other reparse points, not only symlinks.
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    meta.file_type().is_symlink()
 }
 
 /// `url` of `[remote "origin"]` in a git config file.
@@ -219,6 +256,44 @@ mod tests {
         std::fs::write(dir.join("gd/commondir"), "//127.0.0.1/share\n").unwrap();
         assert_eq!(git_dir(&dir), None);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn links_inside_the_folder_are_not_followed() {
+        let dir = temp_dir("link");
+        let outside = temp_dir("link-target");
+        std::fs::create_dir_all(outside.join("repo")).unwrap();
+        std::fs::write(
+            outside.join("repo/config"),
+            "[remote \"origin\"]\n\turl = https://github.com/acme/app.git\n",
+        )
+        .unwrap();
+        // `.git` file pointing through a link inside the folder.
+        let link = dir.join("sub");
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&outside, &link).is_ok();
+        #[cfg(windows)]
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if made {
+            std::fs::write(dir.join(".git"), "gitdir: sub/repo\n").unwrap();
+            assert_eq!(detect_repo(&dir), None);
+            // The same repository read directly is fine.
+            std::fs::write(
+                dir.join(".git"),
+                format!("gitdir: {}\n", outside.join("repo").display()),
+            )
+            .unwrap();
+            assert_eq!(detect_repo(&dir).as_deref(), Some("acme/app"));
+        }
+        assert!(goes_through_link(&dir, &dir.join("../x")));
+        assert!(!goes_through_link(&dir, &dir.join("missing/x")));
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(outside);
     }
 
     #[test]
