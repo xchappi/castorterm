@@ -11,6 +11,7 @@ mod session;
 mod shell;
 mod shortcuts;
 mod tabs;
+mod theme;
 mod tree;
 mod view;
 mod workspace_view;
@@ -39,6 +40,14 @@ fn main() {
         .unwrap_or_else(|| std::path::PathBuf::from(std::path::MAIN_SEPARATOR_STR));
 
     Application::new().run(move |cx: &mut App| {
+        // Without the bundled fonts the chrome falls back to the system font.
+        let fonts = theme::BUNDLED_FONTS
+            .iter()
+            .map(|bytes| std::borrow::Cow::Borrowed(*bytes))
+            .collect();
+        if let Err(err) = cx.text_system().add_fonts(fonts) {
+            eprintln!("castorterm: could not load the UI fonts: {err:#}");
+        }
         if let Err(err) = open_workspace_window(settings, launch_dir, cx) {
             eprintln!("castorterm: {err:#}");
             // Nothing is on screen yet: exit right away with a failure code.

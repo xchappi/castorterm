@@ -49,28 +49,28 @@ pub struct Theme {
     pub ansi: [Rgb8; 16],
 }
 
-/// Default dark theme.
+/// "Arcade night": neon colours on a deep indigo background.
 pub const DEFAULT_THEME: Theme = Theme {
-    foreground: Rgb8::hex(0xd4d4d4),
-    background: Rgb8::hex(0x1e1e1e),
-    cursor: Rgb8::hex(0xaeafad),
+    foreground: Rgb8::hex(0xe8e6ff),
+    background: Rgb8::hex(0x0d0b1e),
+    cursor: Rgb8::hex(0xffd319),
     ansi: [
-        Rgb8::hex(0x000000),
-        Rgb8::hex(0xcd3131),
-        Rgb8::hex(0x0dbc79),
-        Rgb8::hex(0xe5e510),
-        Rgb8::hex(0x2472c8),
-        Rgb8::hex(0xbc3fbc),
-        Rgb8::hex(0x11a8cd),
-        Rgb8::hex(0xe5e5e5),
-        Rgb8::hex(0x666666),
-        Rgb8::hex(0xf14c4c),
-        Rgb8::hex(0x23d18b),
-        Rgb8::hex(0xf5f543),
-        Rgb8::hex(0x3b8eea),
-        Rgb8::hex(0xd670d6),
-        Rgb8::hex(0x29b8db),
-        Rgb8::hex(0xe5e5e5),
+        Rgb8::hex(0x1a1633),
+        Rgb8::hex(0xff3e6c),
+        Rgb8::hex(0x39ff8e),
+        Rgb8::hex(0xffd319),
+        Rgb8::hex(0x3d7bff),
+        Rgb8::hex(0xff3ea5),
+        Rgb8::hex(0x2de2e6),
+        Rgb8::hex(0xd8d4f0),
+        Rgb8::hex(0x5a5385),
+        Rgb8::hex(0xff6b8b),
+        Rgb8::hex(0x7affb2),
+        Rgb8::hex(0xffe566),
+        Rgb8::hex(0x6e9bff),
+        Rgb8::hex(0xff73c0),
+        Rgb8::hex(0x6ff3f5),
+        Rgb8::hex(0xffffff),
     ],
 };
 
