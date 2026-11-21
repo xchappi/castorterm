@@ -39,6 +39,21 @@ The window has three columns:
   path into the active session, ready to reference in an agent prompt.
 - **Sessions** (right): tabs and the active terminal.
 
+Build your workspaces from the window, no config editing needed:
+
+- **`+ Workspace`** creates a workspace (type its name, Enter) and opens a
+  folder picker for its first projects.
+- **`+`** on a workspace adds folders (several at once). You can also drop
+  folders from your file manager onto the quest log, or press
+  `Ctrl+Shift+O` to add to the selected project's workspace.
+- A new project is named after its folder, and its `repo` is read from the
+  git `origin` remote so the Quests board picks up its tasks.
+- Hover a workspace or project for **rename** (`✎`) and **remove** (`×`).
+  Removing never touches files on disk, and anything with open sessions
+  cannot be removed.
+
+Every change is saved to your config file, keeping your comments.
+
 The middle column also has a **Quests** tab: the task board of the
 workspace, with the tasks of all its projects together, loaded from an
 external **provider** (GitHub Issues, your own tracker...). Select a task to open its link or start an agent on it in the
@@ -52,6 +67,7 @@ Issues example in [`examples/`](examples/).
 | `Ctrl+Shift+W` | Close the current session |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous session |
 | `Ctrl+Shift+E` | Show / hide the file explorer |
+| `Ctrl+Shift+O` | Add folders to the selected workspace |
 
 castorterm exits when the last session closes.
 

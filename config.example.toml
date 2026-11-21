@@ -4,6 +4,8 @@
 #   Windows:      %APPDATA%\castorterm\config.toml
 #   macOS/Linux:  $XDG_CONFIG_HOME/castorterm/config.toml (default ~/.config/castorterm/config.toml)
 # Set CASTORTERM_CONFIG to use another file. Every section is optional.
+# Workspaces and projects can also be created from the window (+ Workspace,
+# +, drag and drop); castorterm then updates this file and keeps comments.
 
 [font]
 family = "Cascadia Mono"

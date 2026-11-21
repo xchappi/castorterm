@@ -7,10 +7,13 @@ use std::time::{Duration, Instant};
 
 use futures::channel::mpsc;
 use gpui::{
-    AnyElement, BoxShadow, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, FontWeight,
-    KeyDownEvent, Rgba, SharedString, Stateful, Subscription, Window, div, linear_color_stop,
-    linear_gradient, point, prelude::*, px, rgb, rgba,
+    AnyElement, BoxShadow, ClickEvent, Context, Div, ElementId, Entity, ExternalPaths,
+    Focusable as _, FontWeight, KeyDownEvent, Rgba, SharedString, Stateful, Subscription, Window,
+    div, linear_color_stop, linear_gradient, point, prelude::*, px, rgb, rgba,
 };
+
+mod manage;
+use manage::{EditTarget, NameEditor};
 
 use crate::board::{self, Status, Task as BoardTask};
 use crate::provider;
@@ -93,6 +96,13 @@ pub struct WorkspaceView {
     selected_task: Option<(usize, String)>,
     show_done: bool,
     _board_timer: gpui::Task<()>,
+    /// Where UI changes to workspaces are saved.
+    config_path: Option<PathBuf>,
+    home: Option<PathBuf>,
+    /// Inline name field (new workspace or rename), while open.
+    editor: Option<NameEditor>,
+    /// Result of the last workspace change that could not be saved.
+    notice: Option<String>,
 }
 
 impl WorkspaceView {
@@ -137,6 +147,10 @@ impl WorkspaceView {
             selected_task: None,
             show_done: false,
             _board_timer: board_timer,
+            config_path: settings.config_path,
+            home: settings.home,
+            editor: None,
+            notice: None,
         };
         if let Some(node) = this.tree.projects.get(initial_project) {
             this.expand_dir(node.path.clone(), cx);
@@ -323,10 +337,7 @@ impl WorkspaceView {
 
     /// Workspace that contains the selected project.
     fn selected_workspace(&self) -> Option<usize> {
-        self.tree
-            .workspaces
-            .iter()
-            .position(|w| w.projects.contains(&self.selected_project))
+        self.tree.workspace_of(self.selected_project)
     }
 
     fn show_tab(&mut self, tab: MiddleTab, cx: &mut Context<Self>) {
@@ -468,6 +479,12 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The name field takes every key while it is open.
+        if self.editor.is_some() {
+            cx.stop_propagation();
+            self.on_editor_key(event, window, cx);
+            return;
+        }
         let keystroke = &event.keystroke;
         let mods = Mods {
             ctrl: keystroke.modifiers.control,
@@ -506,6 +523,11 @@ impl WorkspaceView {
             Shortcut::ToggleFiles => {
                 self.show_files = !self.show_files;
                 cx.notify();
+            }
+            Shortcut::AddFolder => {
+                if let Some(workspace) = self.selected_workspace() {
+                    self.pick_folders(workspace, window, cx);
+                }
             }
         }
     }
@@ -572,6 +594,7 @@ impl WorkspaceView {
             .config_messages
             .iter()
             .chain(self.launch_error.as_ref())
+            .chain(self.notice.as_ref())
             .map(|msg| {
                 div()
                     .px_2()
@@ -585,126 +608,229 @@ impl WorkspaceView {
                     .child(SharedString::from(msg.clone()))
             });
 
-        let workspaces = self.tree.workspaces.iter().map(|workspace| {
-            let projects = workspace.projects.iter().map(|&project| {
-                let node = &self.tree.projects[project];
-                let selected = project == self.selected_project;
-                let launchers = self.launchers.iter().enumerate().filter(|_| selected).map(
-                    |(index, launcher)| {
-                        launcher_button(
-                            (SharedString::from(format!("launch-{project}")), index),
-                            format!("+ {}", launcher.name),
-                            launcher_color(index),
-                        )
-                        .on_click(cx.listener(
-                            move |this, _: &ClickEvent, window, cx| {
-                                this.launch(project, index, window, cx)
-                            },
-                        ))
-                    },
-                );
-                let sessions = self
-                    .tabs
-                    .iter()
-                    .filter(|tab| tab.project == project)
-                    .map(|tab| {
-                        let id = tab.id;
-                        let is_active = active == Some(id);
-                        let color = tab.handle.color;
-                        div()
-                            .id(("session", id))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .ml_4()
-                            .px_2()
-                            .py(px(5.0))
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_color(rgb(if is_active { TEXT } else { MUTED }))
-                            .when(is_active, |d| {
-                                d.bg(linear_gradient(
-                                    90.0,
-                                    linear_color_stop(rgba(with_alpha(color, 0x38)), 0.0),
-                                    linear_color_stop(rgba(with_alpha(color, 0x00)), 1.0),
-                                ))
-                            })
-                            .when(!is_active, |d| {
-                                d.hover(|s| s.bg(rgba(with_alpha(TEXT, 0x0d))))
-                            })
-                            .child(dot(color, 7.0, is_active))
-                            .child(SharedString::from(tab.label.clone()))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                this.activate(id, window, cx)
-                            }))
-                    });
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .pb_2()
-                    .child(
-                        div()
-                            .id(("project", project))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .px_2()
-                            .py(px(4.0))
-                            .rounded_md()
-                            .cursor_pointer()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(if selected { TEXT } else { MUTED }))
-                            .when(selected, |d| d.bg(rgba(with_alpha(TEXT, 0x0f))))
-                            .when(!selected, |d| {
-                                d.hover(|s| s.bg(rgba(with_alpha(TEXT, 0x0a))))
-                            })
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .w(px(10.0))
-                                    .text_color(rgb(WORKSPACE))
-                                    .child(if selected { "›" } else { "" }),
+        let workspaces = self
+            .tree
+            .workspaces
+            .iter()
+            .enumerate()
+            .map(|(w_index, workspace)| {
+                let projects = workspace.projects.iter().map(|&project| {
+                    let node = &self.tree.projects[project];
+                    let selected = project == self.selected_project;
+                    let group = SharedString::from(format!("project-row-{project}"));
+                    let removable = !self.has_sessions(&[project]);
+                    let launchers = self.launchers.iter().enumerate().filter(|_| selected).map(
+                        |(index, launcher)| {
+                            launcher_button(
+                                (SharedString::from(format!("launch-{project}")), index),
+                                format!("+ {}", launcher.name),
+                                launcher_color(index),
                             )
-                            .child(SharedString::from(node.name.clone()))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.select_project(project, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .when(selected, |d| {
-                        d.child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .gap_1()
-                                .pl_5()
-                                .pr_1()
-                                .pb_1()
-                                .children(launchers),
-                        )
-                    })
-                    .children(sessions)
-            });
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .pt_2()
-                .child(
+                            .on_click(cx.listener(
+                                move |this, _: &ClickEvent, window, cx| {
+                                    this.launch(project, index, window, cx)
+                                },
+                            ))
+                        },
+                    );
+                    let sessions =
+                        self.tabs
+                            .iter()
+                            .filter(|tab| tab.project == project)
+                            .map(|tab| {
+                                let id = tab.id;
+                                let is_active = active == Some(id);
+                                let color = tab.handle.color;
+                                div()
+                                    .id(("session", id))
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .ml_4()
+                                    .px_2()
+                                    .py(px(5.0))
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_color(rgb(if is_active { TEXT } else { MUTED }))
+                                    .when(is_active, |d| {
+                                        d.bg(linear_gradient(
+                                            90.0,
+                                            linear_color_stop(rgba(with_alpha(color, 0x38)), 0.0),
+                                            linear_color_stop(rgba(with_alpha(color, 0x00)), 1.0),
+                                        ))
+                                    })
+                                    .when(!is_active, |d| {
+                                        d.hover(|s| s.bg(rgba(with_alpha(TEXT, 0x0d))))
+                                    })
+                                    .child(dot(color, 7.0, is_active))
+                                    .child(SharedString::from(tab.label.clone()))
+                                    .on_click(cx.listener(
+                                        move |this, _: &ClickEvent, window, cx| {
+                                            this.activate(id, window, cx)
+                                        },
+                                    ))
+                            });
                     div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .pb_2()
+                        .child(
+                            div()
+                                .id(("project", project))
+                                .group(group.clone())
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .px_2()
+                                .py(px(4.0))
+                                .rounded_md()
+                                .cursor_pointer()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(if selected { TEXT } else { MUTED }))
+                                .when(selected, |d| d.bg(rgba(with_alpha(TEXT, 0x0f))))
+                                .when(!selected, |d| {
+                                    d.hover(|s| s.bg(rgba(with_alpha(TEXT, 0x0a))))
+                                })
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .w(px(10.0))
+                                        .text_color(rgb(WORKSPACE))
+                                        .child(if selected { "›" } else { "" }),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(SharedString::from(node.name.clone())),
+                                )
+                                .when(removable, |d| {
+                                    d.child(
+                                        Self::row_action(
+                                            ("remove-project", project),
+                                            group.clone(),
+                                            "×",
+                                            ERROR,
+                                        )
+                                        .on_click(
+                                            cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                                cx.stop_propagation();
+                                                this.remove_project(w_index, project, cx);
+                                            }),
+                                        ),
+                                    )
+                                })
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.select_project(project, cx);
+                                    cx.notify();
+                                })),
+                        )
+                        .when(selected, |d| {
+                            d.child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap_1()
+                                    .pl_5()
+                                    .pr_1()
+                                    .pb_1()
+                                    .children(launchers),
+                            )
+                        })
+                        .children(sessions)
+                });
+                let group = SharedString::from(format!("workspace-row-{w_index}"));
+                let removable = !self.has_sessions(&workspace.projects);
+                let header = if self.renaming(w_index) {
+                    self.render_editor()
+                        .unwrap_or_else(|| div().into_any_element())
+                } else {
+                    div()
+                        .id(("workspace-header", w_index))
+                        .group(group.clone())
                         .flex()
                         .items_center()
                         .gap_2()
                         .px_2()
+                        .py(px(2.0))
                         .text_size(px(SMALL_TEXT_SIZE))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(WORKSPACE))
                         .child(dot(WORKSPACE, 6.0, true))
-                        .child(SharedString::from(label(&workspace.name))),
-                )
-                .children(projects)
-        });
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(SharedString::from(label(&workspace.name))),
+                        )
+                        .child(
+                            Self::row_action(("add-folder", w_index), group.clone(), "+", ACCENT)
+                                .opacity(1.0)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    this.pick_folders(w_index, window, cx)
+                                })),
+                        )
+                        .child(
+                            Self::row_action(
+                                ("rename-workspace", w_index),
+                                group.clone(),
+                                "✎",
+                                ACCENT,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _: &ClickEvent, _, cx| {
+                                    this.open_editor(EditTarget::Rename(w_index), cx)
+                                },
+                            )),
+                        )
+                        .when(removable, |d| {
+                            d.child(
+                                Self::row_action(
+                                    ("remove-workspace", w_index),
+                                    group.clone(),
+                                    "×",
+                                    ERROR,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _: &ClickEvent, _, cx| {
+                                        this.remove_workspace(w_index, cx)
+                                    },
+                                )),
+                            )
+                        })
+                        .into_any_element()
+                };
+                let empty = workspace.projects.is_empty();
+                div()
+                    .id(("workspace", w_index))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .pt_2()
+                    .pb_1()
+                    .rounded_md()
+                    .drag_over::<ExternalPaths>(|style, _, _, _| {
+                        style.bg(rgba(with_alpha(WORKSPACE, 0x18)))
+                    })
+                    .on_drop(cx.listener(move |this, paths: &ExternalPaths, _, cx| {
+                        this.add_folders(w_index, paths.paths().to_vec(), cx)
+                    }))
+                    .child(header)
+                    .when(empty, |d| d.child(self.render_empty_workspace(w_index, cx)))
+                    .children(projects)
+            });
+        let new_workspace = self
+            .editor
+            .as_ref()
+            .filter(|e| e.target == EditTarget::NewWorkspace)
+            .and_then(|_| self.render_editor());
 
         div()
             .id("sidebar")
@@ -723,13 +849,47 @@ impl WorkspaceView {
             .text_color(rgb(MUTED))
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
                     .px_2()
                     .text_size(px(SMALL_TEXT_SIZE))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("QUEST LOG"),
+                    .child("QUEST LOG")
+                    .child(
+                        div()
+                            .id("new-workspace")
+                            .px_2()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_color(rgb(ACCENT))
+                            .hover(|s| s.bg(rgba(with_alpha(ACCENT, 0x22))))
+                            .child("+ Workspace")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                if this.editor.is_some() {
+                                    this.editor = None;
+                                    cx.notify();
+                                } else {
+                                    this.open_editor(EditTarget::NewWorkspace, cx);
+                                }
+                            })),
+                    ),
             )
             .children(messages)
             .children(workspaces)
+            .children(new_workspace)
+            // Folders dropped outside any workspace go to the selected one.
+            .child(
+                div()
+                    .id("sidebar-drop")
+                    .flex_1()
+                    .min_h(px(40.0))
+                    .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                        if let Some(workspace) = this.selected_workspace() {
+                            this.add_folders(workspace, paths.paths().to_vec(), cx);
+                        }
+                    })),
+            )
     }
 
     fn render_explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {

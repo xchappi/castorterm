@@ -9,6 +9,8 @@ pub enum Shortcut {
     NextSession,
     PrevSession,
     ToggleFiles,
+    /// Add folders to the selected workspace.
+    AddFolder,
 }
 
 impl Shortcut {
@@ -20,7 +22,7 @@ impl Shortcut {
 }
 
 /// Maps a GPUI key name plus modifiers to a shortcut. Chosen to avoid keys
-/// that shells and TUIs use: Ctrl+Shift+T/W/E and Ctrl+(Shift+)Tab.
+/// that shells and TUIs use: Ctrl+Shift+T/W/E/O and Ctrl+(Shift+)Tab.
 pub fn match_shortcut(key: &str, mods: Mods) -> Option<Shortcut> {
     if !mods.ctrl || mods.alt {
         return None;
@@ -30,6 +32,7 @@ pub fn match_shortcut(key: &str, mods: Mods) -> Option<Shortcut> {
         ("t", true) => Some(Shortcut::NewShell),
         ("w", true) => Some(Shortcut::CloseSession),
         ("e", true) => Some(Shortcut::ToggleFiles),
+        ("o", true) => Some(Shortcut::AddFolder),
         ("tab", false) => Some(Shortcut::NextSession),
         ("tab", true) => Some(Shortcut::PrevSession),
         _ => None,
@@ -57,6 +60,8 @@ mod tests {
         assert_eq!(match_shortcut("T", CTRL_SHIFT), Some(Shortcut::NewShell));
         assert_eq!(match_shortcut("e", CTRL_SHIFT), Some(Shortcut::ToggleFiles));
         assert_eq!(match_shortcut("e", CTRL), None);
+        assert_eq!(match_shortcut("o", CTRL_SHIFT), Some(Shortcut::AddFolder));
+        assert_eq!(match_shortcut("o", CTRL), None);
         assert_eq!(
             match_shortcut("w", CTRL_SHIFT),
             Some(Shortcut::CloseSession)

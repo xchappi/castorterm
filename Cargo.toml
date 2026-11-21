@@ -18,6 +18,7 @@ gpui = "0.2.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+toml_edit = "0.22"
 
 # Compile Metal shaders at runtime: avoids requiring the full Xcode Metal toolchain.
 [target.'cfg(unix)'.dependencies]
