@@ -9,8 +9,8 @@ CRT scanlines.
 ### Requirement: Bundled fonts
 The system SHALL embed its chrome fonts and register them at startup: a readable HUD-style font
 for all chrome text and a pixel font used only for the logo. Terminal text SHALL keep using the
-configured or platform monospace font. If the fonts cannot be registered the system SHALL keep
-running with the system font.
+configured or platform monospace font. If a font cannot be registered the system SHALL keep
+running with the system font and SHALL show the error in the sidebar.
 
 #### Scenario: Fonts not installed on the machine
 - **WHEN** castorterm starts on a machine without those fonts installed
@@ -28,7 +28,7 @@ the sidebar and tab bar, the active tab accent and the frame around the terminal
 
 ### Requirement: HUD
 The system SHALL show a HUD bar above the sidebar and tabs with the `CASTORTERM` logo, the number
-of open sessions and the application version.
+of open sessions and the application version, labelled as a level (`LVL 0.0.1`).
 
 #### Scenario: Session counter
 - **WHEN** two sessions are open

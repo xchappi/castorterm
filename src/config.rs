@@ -185,8 +185,10 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
         }
         None => e.message().to_string(),
     })?;
-    let mut settings = Settings::default();
-    settings.scanlines = raw.ui.scanlines.unwrap_or(true);
+    let mut settings = Settings {
+        scanlines: raw.ui.scanlines.unwrap_or(true),
+        ..Settings::default()
+    };
 
     settings.font_family = raw
         .font

@@ -77,7 +77,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Specs and change proposals live in
 
 ## Credits
 
-Bundled fonts, both under the [SIL Open Font License 1.1](assets/fonts/):
+Bundled fonts, both under the SIL Open Font License 1.1 (see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)):
 [Chakra Petch](https://github.com/m4rc1e/Chakra-Petch) (UI) and
 [Press Start 2P](https://github.com/codeman38/PressStart2P) (logo).
 

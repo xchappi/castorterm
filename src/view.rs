@@ -334,15 +334,26 @@ fn paint_frame(bounds: Bounds<Pixels>, frame: Frame, window: &mut Window, cx: &m
 /// Horizontal dark lines over the whole terminal, like an old CRT.
 fn paint_scanlines(bounds: Bounds<Pixels>, window: &mut Window) {
     let color = to_hsla(Rgb8::hex(0x000000), SCANLINE_ALPHA);
+    let scale = window.scale_factor();
+    // Lines are snapped to whole device pixels so they stay sharp at
+    // fractional scale factors (125 %, 150 %).
+    let line_height = scale.round().max(1.0) / scale;
+    let top = bounds.origin.y / px(1.0);
     for y in scanline_offsets(bounds.size.height / px(1.0)) {
+        let y = snap_to_device(top + y, scale);
         window.paint_quad(fill(
             Bounds::new(
-                point(bounds.origin.x, bounds.origin.y + px(y)),
-                size(bounds.size.width, px(1.0)),
+                point(bounds.origin.x, px(y)),
+                size(bounds.size.width, px(line_height)),
             ),
             color,
         ));
     }
+}
+
+/// Rounds a logical coordinate to the nearest device pixel.
+fn snap_to_device(value: f32, scale: f32) -> f32 {
+    (value * scale).round() / scale
 }
 
 /// Y offsets (in pixels from the top) of the scanlines for a given height.
@@ -350,7 +361,8 @@ fn scanline_offsets(height: f32) -> impl Iterator<Item = f32> {
     let count = (height.max(0.0) / SCANLINE_PERIOD).ceil() as usize;
     (0..count)
         .map(|i| i as f32 * SCANLINE_PERIOD + (SCANLINE_PERIOD - 1.0))
-        .filter(move |y| *y < height)
+        // Only lines that fit completely, so nothing is drawn below the area.
+        .filter(move |y| *y + 1.0 <= height)
 }
 
 fn to_hsla(color: Rgb8, alpha: f32) -> Hsla {
@@ -451,6 +463,19 @@ mod tests {
         assert_eq!(ys, vec![2.0, 5.0, 8.0]);
         assert!(scanline_offsets(0.0).next().is_none());
         assert!(scanline_offsets(-5.0).next().is_none());
+        // Fractional heights never overflow the area.
+        let ys: Vec<f32> = scanline_offsets(8.5).collect();
+        assert_eq!(ys, vec![2.0, 5.0]);
+        let ys: Vec<f32> = scanline_offsets(9.0).collect();
+        assert_eq!(ys, vec![2.0, 5.0, 8.0]);
+    }
+
+    #[test]
+    fn snapping_to_device_pixels() {
+        assert_eq!(snap_to_device(10.3, 1.0), 10.0);
+        assert_eq!(snap_to_device(10.3, 1.5), 10.0);
+        assert_eq!(snap_to_device(10.4, 1.5), 16.0 / 1.5);
+        assert_eq!(snap_to_device(10.5, 2.0), 10.5);
     }
 
     #[test]

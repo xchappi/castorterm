@@ -13,8 +13,13 @@ read at sidebar sizes, so the pixel font was restricted to the logo.
   Oxanium (only distributed as a variable font, whose default instance is not the regular weight).
 - **Press Start 2P** only for the 16 px logo (8 px grid keeps it crisp).
 - Fonts are embedded with `include_bytes!` and registered with `TextSystem::add_fonts` at startup,
-  so no installation is needed. If registration fails the chrome falls back to the system font and
-  a message goes to stderr.
+  one call per font (on Windows one failing font would otherwise drop the whole batch), so no
+  installation is needed. If a font fails to register the chrome falls back to the system font and
+  the error is shown in the sidebar (release builds on Windows have no console). A test checks that
+  each file declares the family name used in code.
+- The OFL requires the licence to travel with the fonts: both licences are in `assets/fonts/` and
+  reproduced in `THIRD_PARTY_NOTICES.md`, which release archives must include. The TTFs are the
+  unmodified upstream files, as the Reserved Font Name clause requires.
 - The terminal keeps the platform monospace font (configurable); pixel fonts are not used for
   terminal text.
 
@@ -29,8 +34,9 @@ read at sidebar sizes, so the pixel font was restricted to the logo.
 
 ### Scanlines
 
-Painted after the text as 1 px black quads every 3 px at 10 % alpha (about 250 quads for a full
-HD terminal, negligible). On by default for the game feel; `[ui] scanlines = false` disables
+Painted after the text as 1 px black quads every 3 px at 10 % alpha, snapped to device pixels
+so they stay sharp at fractional scale factors; only whole lines inside the area are drawn. That
+is height / 3 quads per frame (about 320 at 1080p), negligible next to the text. On by default for the game feel; `[ui] scanlines = false` disables
 them for anyone who finds them distracting.
 
 ## Risks / Trade-offs

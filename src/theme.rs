@@ -7,11 +7,20 @@ pub const UI_FONT: &str = "Chakra Petch";
 /// Pixel font, only for the logo (SIL Open Font License).
 pub const LOGO_FONT: &str = "Press Start 2P";
 
-/// Fonts registered at startup.
-pub const BUNDLED_FONTS: [&[u8]; 3] = [
-    include_bytes!("../assets/fonts/ChakraPetch-Regular.ttf"),
-    include_bytes!("../assets/fonts/ChakraPetch-SemiBold.ttf"),
-    include_bytes!("../assets/fonts/PressStart2P-Regular.ttf"),
+/// Fonts registered at startup, with the family name each one declares.
+pub const BUNDLED_FONTS: [(&str, &[u8]); 3] = [
+    (
+        UI_FONT,
+        include_bytes!("../assets/fonts/ChakraPetch-Regular.ttf"),
+    ),
+    (
+        UI_FONT,
+        include_bytes!("../assets/fonts/ChakraPetch-SemiBold.ttf"),
+    ),
+    (
+        LOGO_FONT,
+        include_bytes!("../assets/fonts/PressStart2P-Regular.ttf"),
+    ),
 ];
 
 pub const TEXT_SIZE: f32 = 13.0;
@@ -83,9 +92,22 @@ mod tests {
 
     #[test]
     fn fonts_are_bundled_truetype() {
-        for font in BUNDLED_FONTS {
+        for (_, font) in BUNDLED_FONTS {
             // TrueType files start with version 1.0 (0x00010000).
             assert_eq!(&font[..4], &[0, 1, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn fonts_declare_the_family_names_used_in_code() {
+        // The `name` table stores Windows names as UTF-16BE; a wrong family
+        // constant would silently fall back to the system font.
+        for (family, font) in BUNDLED_FONTS {
+            let needle: Vec<u8> = family.encode_utf16().flat_map(u16::to_be_bytes).collect();
+            assert!(
+                font.windows(needle.len()).any(|w| w == needle.as_slice()),
+                "{family} not found in its font file"
+            );
         }
     }
 }
