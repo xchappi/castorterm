@@ -1,6 +1,7 @@
 //! Embeds the application icon in the Windows executable. GPUI loads icon
 //! resource 1 for the window, so the same icon shows in the title bar, the
-//! taskbar and shortcuts.
+//! taskbar and shortcuts. Only Windows builds made on Windows get it: cross
+//! builds from another OS have no icon.
 
 fn main() {
     println!("cargo:rerun-if-changed=assets/castorterm.ico");

@@ -30,7 +30,8 @@ if (-not $NoBuild) {
     cargo build --release --manifest-path (Join-Path $repo "Cargo.toml")
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 }
-$built = Join-Path $repo "target\release\castorterm.exe"
+$targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $repo "target" }
+$built = Join-Path $targetDir "release\castorterm.exe"
 if (-not (Test-Path $built)) { throw "Not found: $built (build it or drop -NoBuild)" }
 
 # The installed copy cannot be replaced while it runs.
@@ -39,15 +40,30 @@ $running = Get-Process castorterm -ErrorAction SilentlyContinue |
 if ($running) { throw "castorterm is running from ${exe}: close it and run the installer again" }
 
 New-Item -ItemType Directory -Force $installDir | Out-Null
-Copy-Item $built $exe -Force
+try {
+    Copy-Item $built $exe -Force
+} catch {
+    throw "Could not replace $exe (is castorterm running from there? close it and try again): $_"
+}
 Write-Host "Installed $exe"
 
-# User PATH, without duplicates.
-$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-$entries = @($userPath -split ";" | Where-Object { $_ })
-if (-not ($entries | Where-Object { $_.TrimEnd("\") -ieq $installDir })) {
-    [Environment]::SetEnvironmentVariable("Path", (($entries + $installDir) -join ";"), "User")
-    Write-Host "Added $installDir to the user PATH (open a new terminal to use it)"
+# User PATH, without duplicates. Read and written raw (REG_EXPAND_SZ), so
+# entries like %USERPROFILE%\bin stay as they are instead of being expanded.
+$envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
+try {
+    $userPath = [string]$envKey.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $entries = @($userPath -split ";" | Where-Object { $_ })
+    $present = $entries | Where-Object {
+        [Environment]::ExpandEnvironmentVariables($_).TrimEnd("\") -ieq $installDir
+    }
+    if (-not $present) {
+        $envKey.SetValue("Path", (($entries + $installDir) -join ";"), [Microsoft.Win32.RegistryValueKind]::ExpandString)
+        # Broadcast the change so new programs (Explorer) see it.
+        [Environment]::SetEnvironmentVariable("CASTORTERM_INSTALL_PING", $null, "User")
+        Write-Host "Added $installDir to the user PATH (open a new terminal to use it)"
+    }
+} finally {
+    $envKey.Close()
 }
 
 function New-Shortcut([string]$Path) {
@@ -58,6 +74,7 @@ function New-Shortcut([string]$Path) {
     $link.IconLocation = "$exe,0"
     $link.Description = "castorterm - terminal for AI agents"
     $link.Save()
+    [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
     Write-Host "Shortcut: $Path"
 }
 
