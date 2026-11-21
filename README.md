@@ -28,16 +28,23 @@ Every CI run on Windows publishes a `castorterm-windows-preview` artifact
 
 ## Usage
 
-The sidebar lists your workspaces and projects. Each project has one
-launcher per agent (`+ Shell`, `+ Claude Code`...): it opens a new session
-in the project directory. Sessions show up under their project and in the
-tab bar.
+The window has three columns:
+
+- **Quest log** (left): your workspaces and projects, with the open sessions
+  under each project. Click a project to select it; its launchers
+  (`+ Shell`, `+ Claude Code`...) open a new session in the project
+  directory.
+- **Files** (middle): the file tree of the selected project's workspace, one
+  root per project. Click a folder to expand it; click a file to type its
+  path into the active session, ready to reference in an agent prompt.
+- **Sessions** (right): tabs and the active terminal.
 
 | Shortcut | Action |
 |---|---|
 | `Ctrl+Shift+T` | New shell in the current project |
 | `Ctrl+Shift+W` | Close the current session |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous session |
+| `Ctrl+Shift+E` | Show / hide the file explorer |
 
 castorterm exits when the last session closes.
 

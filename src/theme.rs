@@ -56,6 +56,23 @@ pub fn launcher_color(index: usize) -> u32 {
     CLASS_COLORS[index % CLASS_COLORS.len()]
 }
 
+/// Colour of a file in the explorer by type, like item rarity in a game.
+pub fn file_color(name: &str) -> u32 {
+    let lower = name.to_lowercase();
+    let ext = lower.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
+    match ext {
+        "rs" => 0xff9f1c,
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => 0xffd319,
+        "py" | "go" | "java" | "kt" | "c" | "h" | "cpp" | "hpp" | "cs" | "rb" | "php" | "swift"
+        | "sh" | "ps1" | "sql" | "html" | "css" | "scss" | "vue" | "svelte" | "astro" => 0x6e9bff,
+        "md" | "mdx" | "txt" | "rst" | "adoc" => 0x2de2e6,
+        "toml" | "yaml" | "yml" | "json" | "jsonc" | "lock" | "ini" | "env" | "xml" => 0x39ff8e,
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "ico" | "webp" | "ttf" | "otf" | "woff"
+        | "woff2" | "mp3" | "mp4" | "wav" => 0xff4fb0,
+        _ => MUTED,
+    }
+}
+
 /// 0xRRGGBB plus an alpha byte, as 0xRRGGBBAA for `gpui::rgba`.
 pub fn with_alpha(color: u32, alpha: u8) -> u32 {
     ((color & 0xff_ffff) << 8) | alpha as u32
@@ -83,6 +100,17 @@ mod tests {
         assert_eq!(with_alpha(0x112233, 0x44), 0x1122_3344);
         // Stray high bits are ignored.
         assert_eq!(with_alpha(0xff11_2233, 0xff), 0x1122_33ff);
+    }
+
+    #[test]
+    fn file_colors_by_category() {
+        assert_eq!(file_color("main.rs"), 0xff9f1c);
+        assert_eq!(file_color("Cargo.toml"), 0x39ff8e);
+        assert_eq!(file_color("README.MD"), 0x2de2e6);
+        assert_eq!(file_color("app.tsx"), 0xffd319);
+        assert_eq!(file_color("logo.svg"), 0xff4fb0);
+        assert_eq!(file_color("LICENSE"), MUTED);
+        assert_eq!(file_color(".gitignore"), MUTED);
     }
 
     #[test]

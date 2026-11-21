@@ -8,6 +8,7 @@ pub enum Shortcut {
     CloseSession,
     NextSession,
     PrevSession,
+    ToggleFiles,
 }
 
 impl Shortcut {
@@ -19,7 +20,7 @@ impl Shortcut {
 }
 
 /// Maps a GPUI key name plus modifiers to a shortcut. Chosen to avoid keys
-/// that shells and TUIs use: Ctrl+Shift+T/W and Ctrl+(Shift+)Tab.
+/// that shells and TUIs use: Ctrl+Shift+T/W/E and Ctrl+(Shift+)Tab.
 pub fn match_shortcut(key: &str, mods: Mods) -> Option<Shortcut> {
     if !mods.ctrl || mods.alt {
         return None;
@@ -28,6 +29,7 @@ pub fn match_shortcut(key: &str, mods: Mods) -> Option<Shortcut> {
     match (key.as_str(), mods.shift) {
         ("t", true) => Some(Shortcut::NewShell),
         ("w", true) => Some(Shortcut::CloseSession),
+        ("e", true) => Some(Shortcut::ToggleFiles),
         ("tab", false) => Some(Shortcut::NextSession),
         ("tab", true) => Some(Shortcut::PrevSession),
         _ => None,
@@ -53,6 +55,8 @@ mod tests {
     fn shortcuts() {
         assert_eq!(match_shortcut("t", CTRL_SHIFT), Some(Shortcut::NewShell));
         assert_eq!(match_shortcut("T", CTRL_SHIFT), Some(Shortcut::NewShell));
+        assert_eq!(match_shortcut("e", CTRL_SHIFT), Some(Shortcut::ToggleFiles));
+        assert_eq!(match_shortcut("e", CTRL), None);
         assert_eq!(
             match_shortcut("w", CTRL_SHIFT),
             Some(Shortcut::CloseSession)
@@ -68,6 +72,7 @@ mod tests {
     fn only_navigation_repeats() {
         assert!(!Shortcut::NewShell.repeats());
         assert!(!Shortcut::CloseSession.repeats());
+        assert!(!Shortcut::ToggleFiles.repeats());
         assert!(Shortcut::NextSession.repeats());
         assert!(Shortcut::PrevSession.repeats());
     }

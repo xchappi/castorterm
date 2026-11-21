@@ -112,6 +112,11 @@ impl TerminalView {
         }
     }
 
+    /// Types `text` into the shell as if the user had typed it.
+    pub fn type_text(&self, text: &str) {
+        self.session.write(text.as_bytes().to_vec());
+    }
+
     /// Terminates the shell. The view emits `Exited` once the PTY is closed.
     pub fn shutdown(&self) {
         self.session.shutdown();
