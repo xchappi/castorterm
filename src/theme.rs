@@ -23,6 +23,37 @@ pub const BUNDLED_FONTS: [(&str, &[u8]); 3] = [
     ),
 ];
 
+/// Text size factor applied to the terminal and the interface (Ctrl+= /
+/// Ctrl+- / Ctrl+0). One window per process, so a global is enough.
+static ZOOM_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+pub const MIN_ZOOM: f32 = 0.7;
+pub const MAX_ZOOM: f32 = 2.5;
+pub const ZOOM_STEP: f32 = 0.1;
+
+/// Zoom kept in range and on 0.1 steps (non-finite values reset it).
+pub fn clamp_zoom(zoom: f32) -> f32 {
+    if !zoom.is_finite() {
+        return 1.0;
+    }
+    ((zoom * 10.0).round() / 10.0).clamp(MIN_ZOOM, MAX_ZOOM)
+}
+
+pub fn zoom() -> f32 {
+    f32::from_bits(ZOOM_BITS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Sets the zoom and returns the value applied.
+pub fn set_zoom(zoom: f32) -> f32 {
+    let zoom = clamp_zoom(zoom);
+    ZOOM_BITS.store(zoom.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    zoom
+}
+
+/// An interface size scaled by the zoom.
+pub fn ui(size: f32) -> gpui::Pixels {
+    gpui::px((size * zoom()).round())
+}
+
 pub const TEXT_SIZE: f32 = 13.0;
 pub const SMALL_TEXT_SIZE: f32 = 11.0;
 pub const TITLE_TEXT_SIZE: f32 = 20.0;
@@ -95,6 +126,15 @@ pub fn label(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn zoom_is_clamped_and_stepped() {
+        assert_eq!(super::clamp_zoom(1.04), 1.0);
+        assert_eq!(super::clamp_zoom(1.26), 1.3);
+        assert_eq!(super::clamp_zoom(9.0), super::MAX_ZOOM);
+        assert_eq!(super::clamp_zoom(0.1), super::MIN_ZOOM);
+        assert_eq!(super::clamp_zoom(f32::NAN), 1.0);
+    }
+
     use super::*;
 
     #[test]

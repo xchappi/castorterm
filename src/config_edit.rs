@@ -36,7 +36,7 @@ impl ProjectEntry {
 }
 
 /// A change to the workspaces in the config file.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Edit {
     AddWorkspace {
         name: String,
@@ -57,6 +57,13 @@ pub enum Edit {
     RemoveProject {
         workspace: String,
         path: String,
+    },
+    /// `[ui] zoom`.
+    SetZoom(f32),
+    /// `collapsed = true` on a workspace (removed when false).
+    SetCollapsed {
+        workspace: String,
+        collapsed: bool,
     },
 }
 
@@ -124,6 +131,29 @@ pub fn apply(text: &str, edit: &Edit, home: Option<&Path>) -> Result<String, Str
                 return Err(format!(
                     "project '{path}' is not in workspace '{workspace}'"
                 ));
+            }
+        }
+        Edit::SetZoom(zoom) => {
+            if !doc.contains_key("ui") {
+                doc.insert("ui", Item::Table(Table::new()));
+            }
+            let Some(ui) = doc["ui"].as_table_mut() else {
+                return Err("`ui` in the config file is not a table".into());
+            };
+            // One decimal, as shown: 1.2, not 1.2000000476837158.
+            ui["zoom"] = value((f64::from(*zoom) * 10.0).round() / 10.0);
+        }
+        Edit::SetCollapsed {
+            workspace,
+            collapsed,
+        } => {
+            let Some(table) = find_workspace(&mut doc, workspace)? else {
+                return Err(format!("workspace '{workspace}' is not in the config file"));
+            };
+            if *collapsed {
+                table["collapsed"] = value(true);
+            } else {
+                table.remove("collapsed");
             }
         }
     }
@@ -587,6 +617,39 @@ command = "tasks"
         )
         .unwrap();
         assert_eq!(workspaces_of(&out)[0].0, "W");
+    }
+
+    #[test]
+    fn zoom_and_collapsed_are_saved() {
+        let base = BASE.replace("/src/app", &abs("/src/app"));
+        let out = apply(&base, &Edit::SetZoom(1.2_f32), None).unwrap();
+        assert!(out.contains("zoom = 1.2"), "{out}");
+        assert!(out.contains("# My castorterm config"));
+        let s = parse(&out, None).unwrap();
+        assert_eq!(s.zoom, 1.2);
+        let out = apply(
+            &out,
+            &Edit::SetCollapsed {
+                workspace: "Acme".into(),
+                collapsed: true,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(parse(&out, None).unwrap().workspaces[0].collapsed);
+        let out = apply(
+            &out,
+            &Edit::SetCollapsed {
+                workspace: "Acme".into(),
+                collapsed: false,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(!out.contains("collapsed"));
+        // An existing [ui] table is reused.
+        let out = apply("[ui]\nscanlines = false\n", &Edit::SetZoom(1.5), None).unwrap();
+        assert_eq!(out.matches("[ui]").count(), 1);
     }
 
     #[test]

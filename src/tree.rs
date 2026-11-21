@@ -24,6 +24,8 @@ pub struct WorkspaceNode {
     pub implicit: bool,
     /// Task board shown in the Quests tab.
     pub board: Option<Board>,
+    /// Folded in the sidebar (projects hidden).
+    pub collapsed: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -41,6 +43,7 @@ impl ProjectTree {
                 projects: Vec::new(),
                 implicit: false,
                 board: workspace.board.clone(),
+                collapsed: workspace.collapsed,
             };
             for project in &workspace.projects {
                 node.projects.push(tree.projects.len());
@@ -86,6 +89,7 @@ impl ProjectTree {
                     projects: vec![index],
                     implicit: true,
                     board: None,
+                    collapsed: false,
                 })
             }
         }
@@ -158,6 +162,7 @@ impl ProjectTree {
             projects: Vec::new(),
             implicit: false,
             board: None,
+            collapsed: false,
         });
         self.workspaces.len() - 1
     }
@@ -256,6 +261,7 @@ mod tests {
             Workspace {
                 name: "CastorLabs".into(),
                 board: None,
+                collapsed: false,
                 projects: vec![
                     Project {
                         name: "here".into(),
@@ -272,6 +278,7 @@ mod tests {
             Workspace {
                 name: "Empty".into(),
                 board: None,
+                collapsed: false,
                 projects: vec![],
             },
         ])
@@ -319,6 +326,7 @@ mod tests {
         let mut tree = ProjectTree::from_config(&[Workspace {
             name: LOCAL_WORKSPACE.into(),
             board: None,
+            collapsed: false,
             projects: vec![],
         }]);
         tree.project_for_dir(&dir);

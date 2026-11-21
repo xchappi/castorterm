@@ -34,7 +34,7 @@ use crate::tabs::{SessionId, Tabs};
 use crate::theme::{
     ACCENT, BORDER, ERROR, HUD_BG, LOGO_FONT, LOGO_TEXT_SIZE, MUTED, PANEL_BG, SMALL_TEXT_SIZE,
     TEXT, TEXT_SIZE, TITLE, TITLE_TEXT_SIZE, UI_FONT, WORKSPACE, file_color, label, launcher_color,
-    priority_color, with_alpha,
+    priority_color, ui, with_alpha,
 };
 use crate::tree::{Launcher, ProjectTree, SHELL_LAUNCHER, launchers};
 use crate::view::{InputGate, TerminalEvent, TerminalStyle, TerminalView};
@@ -51,6 +51,11 @@ const INITIAL_GRID: GridSize = GridSize {
     cols: 100,
     rows: 30,
 };
+
+/// Zoom changes are saved this long after the last one.
+const ZOOM_SAVE_DELAY: Duration = Duration::from_millis(500);
+/// Ctrl + wheel distance (pixels) per zoom step.
+const WHEEL_PER_ZOOM_STEP: f32 = 40.0;
 
 /// How often agent status files are read.
 const STATUS_TICK: Duration = Duration::from_secs(1);
@@ -134,6 +139,12 @@ pub struct WorkspaceView {
     palette: Option<Palette>,
     /// Start agents on tasks in a git worktree of their own.
     task_worktree: bool,
+    /// Ctrl + wheel distance not yet turned into a zoom step.
+    wheel_acc: f32,
+    /// Pending save of the zoom (replaced, so only the last one runs).
+    zoom_save: Option<gpui::Task<()>>,
+    /// Window width at the last frame, to size the side columns.
+    viewport_width: f32,
     /// Worktrees being created, so a double click starts only one.
     pending_worktrees: std::collections::HashSet<PathBuf>,
     /// Folder of the per-session status files.
@@ -160,6 +171,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> Self {
         let restore_sessions = settings.restore_sessions;
+        crate::theme::set_zoom(settings.zoom);
         // Agents report their status through files; poll them every second.
         let status_timer = cx.spawn(async move |this, cx| {
             loop {
@@ -224,6 +236,9 @@ impl WorkspaceView {
             palette: None,
             focus: cx.focus_handle(),
             task_worktree: false,
+            wheel_acc: 0.0,
+            viewport_width: f32::INFINITY,
+            zoom_save: None,
             pending_worktrees: Default::default(),
             status_dir: None,
             next_status_key: 0,
@@ -394,6 +409,12 @@ impl WorkspaceView {
 
     fn activate(&mut self, id: SessionId, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.activate(id) {
+            // Show it: unfold its workspace for this run (not saved).
+            if let Some(project) = self.tabs.active().map(|t| t.project)
+                && let Some(w) = self.tree.workspace_of(project)
+            {
+                self.tree.workspaces[w].collapsed = false;
+            }
             self.select_active_project(cx);
             self.focus_active(window, cx);
             self.save_state();
@@ -480,6 +501,64 @@ impl WorkspaceView {
             });
         })
         .detach();
+    }
+
+    /// Changes the zoom by `step`, or back to 100% with `None`; repaints
+    /// everything (terminals recompute their grid) and saves it.
+    fn change_zoom(&mut self, step: Option<f32>, cx: &mut Context<Self>) {
+        let current = crate::theme::zoom();
+        let next = crate::theme::set_zoom(step.map_or(1.0, |s| current + s));
+        if next == current {
+            return;
+        }
+        for tab in self.tabs.iter() {
+            tab.handle.view.update(cx, |_, cx| cx.notify());
+        }
+        // Save once the user stops zooming: a wheel gesture makes many steps.
+        self.zoom_save = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(ZOOM_SAVE_DELAY).await;
+            let _ = this.update(cx, |this, _| this.save_zoom());
+        }));
+        cx.notify();
+    }
+
+    /// Width of a side column: grows with the zoom, but never takes more than
+    /// `max_share` of the window, so the terminal keeps most of the space.
+    fn column_width(&self, base: f32, max_share: f32) -> gpui::Pixels {
+        let zoomed = base * crate::theme::zoom();
+        let cap = (self.viewport_width * max_share).max(base);
+        px(zoomed.min(cap).round())
+    }
+
+    /// Writes the current zoom to the config file (pending save done).
+    fn save_zoom(&mut self) {
+        self.zoom_save = None;
+        self.persist_quietly(&crate::config_edit::Edit::SetZoom(crate::theme::zoom()));
+    }
+
+    /// Folds or unfolds `workspace` in the sidebar and saves it.
+    fn toggle_collapsed(&mut self, workspace: usize, cx: &mut Context<Self>) {
+        let Some(node) = self.tree.workspaces.get_mut(workspace) else {
+            return;
+        };
+        node.collapsed = !node.collapsed;
+        if !node.implicit {
+            let edit = crate::config_edit::Edit::SetCollapsed {
+                workspace: node.name.clone(),
+                collapsed: node.collapsed,
+            };
+            self.persist_quietly(&edit);
+        }
+        cx.notify();
+    }
+
+    /// Saves a UI preference; a failure shows in the sidebar like other saves.
+    fn persist_quietly(&mut self, edit: &crate::config_edit::Edit) {
+        if let Some(path) = &self.config_path
+            && let Err(err) = crate::config_edit::save(path, edit, self.home.as_deref())
+        {
+            self.notice = Some(format!("Not saved to the config file: {err}"));
+        }
     }
 
     /// Activates the next session (after the active one, wrapping) whose
@@ -894,6 +973,9 @@ impl WorkspaceView {
             }
             Shortcut::Palette => self.open_palette(window, cx),
             Shortcut::NextWaiting => self.next_waiting(window, cx),
+            Shortcut::ZoomIn => self.change_zoom(Some(crate::theme::ZOOM_STEP), cx),
+            Shortcut::ZoomOut => self.change_zoom(Some(-crate::theme::ZOOM_STEP), cx),
+            Shortcut::ZoomReset => self.change_zoom(None, cx),
         }
     }
 
@@ -905,7 +987,7 @@ impl WorkspaceView {
             .items_center()
             .justify_between()
             .w_full()
-            .h(px(HUD_HEIGHT - 2.0))
+            .h(ui(HUD_HEIGHT - 2.0))
             .px_4()
             .bg(linear_gradient(
                 90.0,
@@ -921,7 +1003,7 @@ impl WorkspaceView {
                     .child(
                         div()
                             .font_family(LOGO_FONT)
-                            .text_size(px(LOGO_TEXT_SIZE))
+                            .text_size(ui(LOGO_TEXT_SIZE))
                             .text_color(rgb(TITLE))
                             .child("CASTORTERM"),
                     ),
@@ -972,7 +1054,7 @@ impl WorkspaceView {
                     .border_1()
                     .border_color(rgba(with_alpha(ERROR, 0x99)))
                     .bg(rgba(with_alpha(ERROR, 0x14)))
-                    .text_size(px(SMALL_TEXT_SIZE))
+                    .text_size(ui(SMALL_TEXT_SIZE))
                     .text_color(rgb(ERROR))
                     .child(SharedString::from(msg.clone()))
             });
@@ -1073,7 +1155,7 @@ impl WorkspaceView {
                                     // The name wins over the branch when space is short.
                                     div()
                                         .flex_shrink_0()
-                                        .max_w(px(130.0))
+                                        .max_w(ui(130.0))
                                         .overflow_hidden()
                                         .text_ellipsis()
                                         .whitespace_nowrap()
@@ -1088,7 +1170,7 @@ impl WorkspaceView {
                                         .text_ellipsis()
                                         .whitespace_nowrap()
                                         .font_weight(FontWeight::NORMAL)
-                                        .text_size(px(SMALL_TEXT_SIZE))
+                                        .text_size(ui(SMALL_TEXT_SIZE))
                                         .text_color(rgba(with_alpha(WORKSPACE, 0xaa)))
                                         .children(
                                             self.branches
@@ -1133,6 +1215,16 @@ impl WorkspaceView {
                 });
                 let group = SharedString::from(format!("workspace-row-{w_index}"));
                 let removable = !self.has_sessions(&workspace.projects);
+                let collapsed = workspace.collapsed;
+                let open_sessions = self
+                    .tabs
+                    .iter()
+                    .filter(|t| workspace.projects.contains(&t.project))
+                    .count();
+                let waiting_inside = self.tabs.iter().any(|t| {
+                    workspace.projects.contains(&t.project)
+                        && self.statuses.get(&t.id) == Some(&AgentStatus::Waiting)
+                });
                 let header = if self.renaming(w_index) {
                     self.render_editor()
                         .unwrap_or_else(|| div().into_any_element())
@@ -1145,18 +1237,54 @@ impl WorkspaceView {
                         .gap_2()
                         .px_2()
                         .py(px(2.0))
-                        .text_size(px(SMALL_TEXT_SIZE))
+                        .text_size(ui(SMALL_TEXT_SIZE))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(WORKSPACE))
                         .child(dot(WORKSPACE, 6.0, true))
                         .child(
+                            // Click the name to fold or unfold the workspace.
                             div()
+                                .id(("workspace-name", w_index))
                                 .flex_1()
                                 .min_w(px(0.0))
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .child(SharedString::from(label(&workspace.name))),
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(rgb(TEXT)))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(rgb(MUTED))
+                                        .child(chevron(!collapsed)),
+                                )
+                                .child(
+                                    div()
+                                        .min_w(px(0.0))
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(SharedString::from(label(&workspace.name))),
+                                )
+                                // Folded: how many sessions run inside, and
+                                // whether an agent there waits for the user.
+                                .when(collapsed && open_sessions > 0, |d| {
+                                    d.child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(rgb(MUTED))
+                                            .font_weight(FontWeight::NORMAL)
+                                            .child(SharedString::from(format!(
+                                                "· {open_sessions}"
+                                            ))),
+                                    )
+                                })
+                                .when(collapsed && waiting_inside, |d| {
+                                    d.child(status_badge(AgentStatus::Waiting))
+                                })
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.toggle_collapsed(w_index, cx)
+                                })),
                         )
                         .child(
                             Self::row_action(("add-folder", w_index), group.clone(), "+", ACCENT)
@@ -1211,8 +1339,10 @@ impl WorkspaceView {
                         this.add_folders(w_index, paths.paths().to_vec(), cx)
                     }))
                     .child(header)
-                    .when(empty, |d| d.child(self.render_empty_workspace(w_index, cx)))
-                    .children(projects)
+                    .when(empty && !collapsed, |d| {
+                        d.child(self.render_empty_workspace(w_index, cx))
+                    })
+                    .when(!collapsed, |d| d.children(projects))
             });
         let new_workspace = self
             .editor
@@ -1223,7 +1353,7 @@ impl WorkspaceView {
         div()
             .id("sidebar")
             .flex_none()
-            .w(px(SIDEBAR_WIDTH))
+            .w(self.column_width(SIDEBAR_WIDTH, 0.24))
             .h_full()
             .flex()
             .flex_col()
@@ -1233,7 +1363,7 @@ impl WorkspaceView {
             .bg(rgb(PANEL_BG))
             .border_r_1()
             .border_color(rgb(BORDER))
-            .text_size(px(TEXT_SIZE))
+            .text_size(ui(TEXT_SIZE))
             .text_color(rgb(MUTED))
             .child(
                 div()
@@ -1241,7 +1371,7 @@ impl WorkspaceView {
                     .items_center()
                     .justify_between()
                     .px_2()
-                    .text_size(px(SMALL_TEXT_SIZE))
+                    .text_size(ui(SMALL_TEXT_SIZE))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("QUEST LOG")
                     .child(
@@ -1270,7 +1400,7 @@ impl WorkspaceView {
                 div()
                     .id("sidebar-drop")
                     .flex_1()
-                    .min_h(px(40.0))
+                    .min_h(ui(40.0))
                     .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                         if let Some(workspace) = this.selected_workspace() {
                             this.add_folders(workspace, paths.paths().to_vec(), cx);
@@ -1309,7 +1439,7 @@ impl WorkspaceView {
             .justify_between()
             .px_2()
             .py_2()
-            .text_size(px(SMALL_TEXT_SIZE))
+            .text_size(ui(SMALL_TEXT_SIZE))
             .font_weight(FontWeight::SEMIBOLD)
             .child(
                 div()
@@ -1347,7 +1477,7 @@ impl WorkspaceView {
             div()
                 .px_3()
                 .pb_1()
-                .text_size(px(SMALL_TEXT_SIZE))
+                .text_size(ui(SMALL_TEXT_SIZE))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(rgb(WORKSPACE))
                 .child(SharedString::from(label(&w.name)))
@@ -1361,7 +1491,7 @@ impl WorkspaceView {
 
         div()
             .flex_none()
-            .w(px(EXPLORER_WIDTH))
+            .w(self.column_width(EXPLORER_WIDTH, 0.28))
             .h_full()
             .flex()
             .flex_col()
@@ -1468,7 +1598,7 @@ impl WorkspaceView {
             div()
                 .px_3()
                 .py_1()
-                .text_size(px(SMALL_TEXT_SIZE))
+                .text_size(ui(SMALL_TEXT_SIZE))
                 .text_color(rgb(color))
                 .child(SharedString::from(text))
                 .into_any_element()
@@ -1537,7 +1667,7 @@ impl WorkspaceView {
                     .px_3()
                     .pt_2()
                     .pb_1()
-                    .text_size(px(SMALL_TEXT_SIZE))
+                    .text_size(ui(SMALL_TEXT_SIZE))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(color))
                     .when(collapsible, |d| {
@@ -1606,7 +1736,7 @@ impl WorkspaceView {
                             .rounded_sm()
                             .border_1()
                             .border_color(rgba(with_alpha(color, 0x80)))
-                            .text_size(px(SMALL_TEXT_SIZE))
+                            .text_size(ui(SMALL_TEXT_SIZE))
                             .text_color(rgb(color))
                             .child(SharedString::from(p.clone()))
                     }))
@@ -1618,7 +1748,7 @@ impl WorkspaceView {
                                 div()
                                     .flex()
                                     .gap_2()
-                                    .text_size(px(SMALL_TEXT_SIZE))
+                                    .text_size(ui(SMALL_TEXT_SIZE))
                                     .text_color(rgb(MUTED))
                                     .child(SharedString::from(task.id.clone()))
                                     .children(self.task_project_label(task, workspace).map(
@@ -1719,7 +1849,7 @@ impl WorkspaceView {
             .gap_1()
             .px_2()
             .pb_2()
-            .text_size(px(SMALL_TEXT_SIZE))
+            .text_size(ui(SMALL_TEXT_SIZE))
             .text_color(rgb(MUTED))
             .child(SharedString::from(project_text))
             .children(prompt.filter(|_| has_buttons).map(|prompt| {
@@ -1839,12 +1969,12 @@ impl WorkspaceView {
             .items_end()
             .gap_1()
             .w_full()
-            .h(px(TAB_BAR_HEIGHT))
+            .h(ui(TAB_BAR_HEIGHT))
             .px_2()
             .pt_1()
             .overflow_x_scroll()
             .bg(rgb(PANEL_BG))
-            .text_size(px(TEXT_SIZE))
+            .text_size(ui(TEXT_SIZE))
             .children(tabs)
     }
 }
@@ -1877,8 +2007,8 @@ fn tree_row(id: ElementId, depth: usize, marker: &'static str) -> Stateful<Div> 
         .flex()
         .items_center()
         .gap_1()
-        .h(px(22.0))
-        .pl(px(8.0 + depth as f32 * TREE_INDENT))
+        .h(ui(22.0))
+        .pl(ui(8.0 + depth as f32 * TREE_INDENT))
         .pr_2()
         .whitespace_nowrap()
         .overflow_hidden()
@@ -1887,7 +2017,7 @@ fn tree_row(id: ElementId, depth: usize, marker: &'static str) -> Stateful<Div> 
         .child(
             div()
                 .flex_none()
-                .w(px(12.0))
+                .w(ui(12.0))
                 .text_color(rgb(MUTED))
                 .child(marker),
         )
@@ -1922,7 +2052,7 @@ fn chip(text: String, color: u32) -> Div {
         .border_1()
         .border_color(rgba(with_alpha(color, 0x66)))
         .bg(rgba(with_alpha(color, 0x14)))
-        .text_size(px(SMALL_TEXT_SIZE))
+        .text_size(ui(SMALL_TEXT_SIZE))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(rgb(color))
         .child(SharedString::from(text))
@@ -1938,7 +2068,7 @@ fn launcher_button(id: impl Into<ElementId>, text: String, color: u32) -> Statef
         .border_1()
         .border_color(rgba(with_alpha(color, 0x80)))
         .bg(rgba(with_alpha(color, 0x14)))
-        .text_size(px(SMALL_TEXT_SIZE))
+        .text_size(ui(SMALL_TEXT_SIZE))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(rgb(color))
         .cursor_pointer()
@@ -1949,6 +2079,15 @@ fn launcher_button(id: impl Into<ElementId>, text: String, color: u32) -> Statef
         })
         .active(move |s| s.bg(rgba(with_alpha(color, 0x55))))
         .child(SharedString::from(text))
+}
+
+/// Whole zoom steps in `distance` (pixels) and what is left over.
+fn wheel_steps(distance: f32, per_step: f32) -> (i32, f32) {
+    if !distance.is_finite() {
+        return (0, 0.0);
+    }
+    let steps = (distance / per_step).trunc();
+    (steps as i32, distance - steps * per_step)
 }
 
 /// Saved form of a window's bounds; full screen is restored as maximized.
@@ -1974,7 +2113,7 @@ fn status_badge(status: AgentStatus) -> Div {
         .flex_none()
         .px_1()
         .rounded_sm()
-        .text_size(px(SMALL_TEXT_SIZE))
+        .text_size(ui(SMALL_TEXT_SIZE))
         .text_color(rgb(color))
         .border_1()
         .border_color(rgba(with_alpha(color, 0x88)))
@@ -2000,6 +2139,9 @@ impl Drop for WorkspaceView {
     fn drop(&mut self) {
         // The last geometry (moves and resizes are not written as they happen).
         self.save_state();
+        if self.zoom_save.is_some() {
+            self.save_zoom();
+        }
         for tab in self.tabs.iter() {
             if let Some(file) = &tab.handle.status_file {
                 let _ = std::fs::remove_file(file);
@@ -2013,6 +2155,7 @@ impl Render for WorkspaceView {
         if std::mem::take(&mut self.attention_pending) && !window.is_window_active() {
             crate::attention::request(window);
         }
+        self.viewport_width = window.viewport_size().width.into();
         let title = self.window_title();
         if title != self.shown_title {
             window.set_window_title(&title);
@@ -2042,7 +2185,7 @@ impl Render for WorkspaceView {
                 .gap_2()
                 .child(
                     div()
-                        .text_size(px(TITLE_TEXT_SIZE))
+                        .text_size(ui(TITLE_TEXT_SIZE))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(TITLE))
                         .child("Press + to start"),
@@ -2061,10 +2204,28 @@ impl Render for WorkspaceView {
             .flex_col()
             .bg(rgb(HUD_BG))
             .font_family(UI_FONT)
-            .text_size(px(TEXT_SIZE))
+            .text_size(ui(TEXT_SIZE))
             .text_color(rgb(TEXT))
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(Self::on_key_capture))
+            // Ctrl + wheel zooms, anywhere in the window.
+            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+                if !event.modifiers.control {
+                    this.wheel_acc = 0.0;
+                    return;
+                }
+                // Touchpads send many small events per gesture: one step per
+                // WHEEL_PER_ZOOM_STEP pixels, not one per event.
+                if matches!(event.touch_phase, gpui::TouchPhase::Started) {
+                    this.wheel_acc = 0.0;
+                }
+                let dy: f32 = event.delta.pixel_delta(px(16.0)).y.into();
+                let (steps, rest) = wheel_steps(this.wheel_acc + dy, WHEEL_PER_ZOOM_STEP);
+                this.wheel_acc = rest;
+                if steps != 0 {
+                    this.change_zoom(Some(crate::theme::ZOOM_STEP * steps as f32), cx);
+                }
+            }))
             .relative()
             .child(self.render_hud())
             .child(
@@ -2094,7 +2255,15 @@ impl Render for WorkspaceView {
 
 #[cfg(test)]
 mod tests {
-    use super::{geometry, plural};
+    use super::{geometry, plural, wheel_steps};
+
+    #[test]
+    fn wheel_distance_becomes_whole_steps() {
+        assert_eq!(wheel_steps(10.0, 40.0), (0, 10.0));
+        assert_eq!(wheel_steps(95.0, 40.0), (2, 15.0));
+        assert_eq!(wheel_steps(-50.0, 40.0), (-1, -10.0));
+        assert_eq!(wheel_steps(f32::NAN, 40.0), (0, 0.0));
+    }
     use gpui::{Bounds, WindowBounds, point, px, size};
 
     #[test]

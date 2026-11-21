@@ -12,7 +12,8 @@ use crate::commands::{self, Action, Entry};
 use crate::keys::Mods;
 use crate::name_input::{InputAction, NameInput};
 use crate::theme::{
-    ACCENT, BORDER, MUTED, PANEL_BG, SMALL_TEXT_SIZE, TEXT, WORKSPACE, launcher_color, with_alpha,
+    ACCENT, BORDER, MUTED, PANEL_BG, SMALL_TEXT_SIZE, TEXT, WORKSPACE, launcher_color, ui,
+    with_alpha,
 };
 
 /// The open palette.
@@ -265,7 +266,7 @@ impl WorkspaceView {
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(SMALL_TEXT_SIZE))
+                        .text_size(ui(SMALL_TEXT_SIZE))
                         .text_color(rgb(MUTED))
                         .child(SharedString::from(entry.detail.clone())),
                 )

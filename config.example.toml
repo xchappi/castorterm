@@ -17,6 +17,8 @@ scanlines = true
 # Reopen the sessions of the last run at startup (sessions.json next to
 # this file). Agents get their resume_args.
 restore_sessions = true
+# Text size of the terminal and the interface (0.7 to 2.5; Ctrl+= / Ctrl+-).
+zoom = 1.0
 
 # Agent launchers. Each one opens your shell in the project directory and
 # types `command` into it, so the shell stays open when the agent exits.

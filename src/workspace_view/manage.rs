@@ -14,7 +14,7 @@ use crate::config_edit::{self, Edit, ProjectEntry};
 use crate::git_remote::detect_repo;
 use crate::keys::Mods;
 use crate::name_input::{InputAction, NameInput};
-use crate::theme::{ACCENT, ERROR, MUTED, SMALL_TEXT_SIZE, TEXT, WORKSPACE, with_alpha};
+use crate::theme::{ACCENT, ERROR, MUTED, SMALL_TEXT_SIZE, TEXT, WORKSPACE, ui, with_alpha};
 use crate::tree::project_node;
 
 /// What the inline name field is for.
@@ -387,7 +387,7 @@ impl WorkspaceView {
                 .child(
                     div()
                         .px_1()
-                        .text_size(px(SMALL_TEXT_SIZE))
+                        .text_size(ui(SMALL_TEXT_SIZE))
                         .text_color(rgb(if editor.error.is_some() { ERROR } else { MUTED }))
                         .child(SharedString::from(
                             editor
@@ -442,7 +442,7 @@ impl WorkspaceView {
             .border_1()
             .border_dashed()
             .border_color(rgba(with_alpha(WORKSPACE, 0x55)))
-            .text_size(px(SMALL_TEXT_SIZE))
+            .text_size(ui(SMALL_TEXT_SIZE))
             .text_color(rgb(MUTED))
             .cursor_pointer()
             .hover(|s| {

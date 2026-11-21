@@ -219,7 +219,7 @@ fn layout_frame(
     window: &mut Window,
 ) -> Frame {
     let theme = &DEFAULT_THEME;
-    let font_size = px(style.size);
+    let font_size = px(style.size * crate::theme::zoom());
     let regular = font(style.family.clone());
     let bold = regular.clone().bold();
     let text_system = window.text_system().clone();
