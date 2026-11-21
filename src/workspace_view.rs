@@ -18,6 +18,7 @@ use manage::{EditTarget, NameEditor};
 use crate::board::{self, Status, Task as BoardTask};
 use crate::git_remote;
 use crate::provider;
+use crate::restore::{self, SavedSession, SavedState};
 
 use crate::config::Settings;
 use crate::files::{self, FileTree, Row, path_for_terminal};
@@ -70,6 +71,8 @@ struct BoardState {
 /// An open session: its terminal view and the subscription to its events.
 struct OpenSession {
     view: Entity<TerminalView>,
+    /// Name of the launcher that started it, saved to restore it.
+    launcher: String,
     /// Class colour of the launcher that started it.
     color: u32,
     _subscription: Subscription,
@@ -111,6 +114,8 @@ pub struct WorkspaceView {
     branches_loading: bool,
     /// Title last set on the window, to set it only when it changes.
     shown_title: String,
+    /// Where the open sessions are saved to restore them next time.
+    state_path: Option<PathBuf>,
 }
 
 impl WorkspaceView {
@@ -121,6 +126,7 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let restore_sessions = settings.restore_sessions;
         let mut tree = ProjectTree::from_config(&settings.workspaces);
         let initial_project = tree.project_for_dir(&launch_dir);
         // Refreshes the visible board when it is due; stops with the view.
@@ -166,11 +172,22 @@ impl WorkspaceView {
             branches: HashMap::new(),
             branches_loading: false,
             shown_title: String::new(),
+            state_path: None,
         };
         if let Some(node) = this.tree.projects.get(initial_project) {
             this.expand_dir(node.path.clone(), cx);
         }
-        this.launch(initial_project, SHELL_LAUNCHER, window, cx);
+        let state_path = this
+            .config_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|dir| dir.join(restore::FILE_NAME));
+        if !(restore_sessions && this.restore_from(state_path.as_deref(), window, cx)) {
+            this.launch(initial_project, SHELL_LAUNCHER, window, cx);
+        }
+        // Saving starts once the startup sessions are open.
+        this.state_path = state_path;
+        this.save_state();
         this.refresh_branches(cx);
         this
     }
@@ -234,11 +251,13 @@ impl WorkspaceView {
             &launcher.name,
             OpenSession {
                 view,
+                launcher: launcher.name.clone(),
                 color,
                 _subscription: subscription,
             },
         );
         self.launch_error = None;
+        self.save_state();
         self.select_project(project, cx);
         self.focus_active(window, cx);
     }
@@ -266,6 +285,7 @@ impl WorkspaceView {
             return;
         };
         session.view.read(cx).shutdown();
+        self.save_state();
         if self.tabs.is_empty() {
             cx.quit();
             return;
@@ -281,7 +301,64 @@ impl WorkspaceView {
         if self.tabs.activate(id) {
             self.select_active_project(cx);
             self.focus_active(window, cx);
+            self.save_state();
             cx.notify();
+        }
+    }
+
+    /// Reopens the sessions of the last run; agents get their `resume_args`
+    /// so they continue where they were. Returns whether any was opened.
+    fn restore_from(
+        &mut self,
+        path: Option<&Path>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(path) = path else {
+            return false;
+        };
+        let (sessions, active) = restore::plan(&restore::load(path), &self.tree, &self.launchers);
+        let mut opened = Vec::new();
+        for (project, launcher) in sessions {
+            // Typed text comes from the config only, never from the file.
+            let typed = self.launchers[launcher].command.as_ref().map(|command| {
+                match &self.launchers[launcher].resume_args {
+                    Some(args) if !args.is_empty() => format!("{command} {}", args.join(" ")),
+                    _ => command.clone(),
+                }
+            });
+            self.launch_with(project, launcher, typed, window, cx);
+            opened.extend(self.tabs.active_id());
+        }
+        if let Some(&id) = active.and_then(|i| opened.get(i)) {
+            self.tabs.activate(id);
+            self.select_active_project(cx);
+            self.focus_active(window, cx);
+        }
+        !opened.is_empty()
+    }
+
+    /// Writes the open sessions (project and launcher) for the next start.
+    fn save_state(&self) {
+        let Some(path) = &self.state_path else {
+            return;
+        };
+        let active = self.tabs.active_id();
+        let mut state = SavedState::default();
+        for (index, tab) in self.tabs.iter().enumerate() {
+            if Some(tab.id) == active {
+                state.active = Some(index);
+            }
+            state.sessions.push(SavedSession {
+                project: self.tree.projects[tab.project].path.clone(),
+                launcher: tab.handle.launcher.clone(),
+            });
+        }
+        if state.sessions.is_empty() {
+            restore::clear(path);
+        } else {
+            // Best effort: losing it only means starting with one shell.
+            let _ = restore::save(path, &state);
         }
     }
 
@@ -590,12 +667,14 @@ impl WorkspaceView {
                 self.tabs.next();
                 self.select_active_project(cx);
                 self.focus_active(window, cx);
+                self.save_state();
                 cx.notify();
             }
             Shortcut::PrevSession => {
                 self.tabs.prev();
                 self.select_active_project(cx);
                 self.focus_active(window, cx);
+                self.save_state();
                 cx.notify();
             }
             Shortcut::ToggleFiles => {

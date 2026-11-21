@@ -54,6 +54,11 @@ Build your workspaces from the window, no config editing needed:
 
 Every change is saved to your config file, keeping your comments.
 
+castorterm reopens the sessions you had open when you start it again (same
+projects, same agents, the same tab active). Agents with `resume_args` in the
+config (for example `claude --continue`) pick up their last conversation.
+Turn it off with `restore_sessions = false` under `[ui]`.
+
 The middle column also has a **Quests** tab: the task board of the
 workspace, with the tasks of all its projects together, loaded from an
 external **provider** (GitHub Issues, your own tracker...). Select a task to open its link or start an agent on it in the

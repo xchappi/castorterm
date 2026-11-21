@@ -14,6 +14,9 @@ size = 14
 [ui]
 # CRT-style scanlines over the terminal.
 scanlines = true
+# Reopen the sessions of the last run at startup (sessions.json next to
+# this file). Agents get their resume_args.
+restore_sessions = true
 
 # Agent launchers. Each one opens your shell in the project directory and
 # types `command` into it, so the shell stays open when the agent exits.
@@ -24,6 +27,9 @@ name = "Claude Code"
 command = "claude"
 # Optional: how to pass a task as the initial prompt (Quests tab).
 task_args = ["{prompt}"]
+# Optional: added when the session is restored at startup, to continue the
+# last conversation in that folder instead of starting a new one.
+resume_args = ["--continue"]
 
 [[agents]]
 name = "OpenCode"

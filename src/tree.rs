@@ -208,7 +208,7 @@ pub fn project_node(dir: &Path, repo: Option<String>) -> ProjectNode {
 
 /// Compares directories after resolving symlinks, `..` and (on Windows)
 /// letter case; falls back to a plain comparison if either does not exist.
-fn same_dir(a: &Path, b: &Path) -> bool {
+pub fn same_dir(a: &Path, b: &Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
@@ -222,6 +222,8 @@ pub struct Launcher {
     pub command: Option<String>,
     /// How to pass an initial prompt (agents only); see `config::Agent`.
     pub task_args: Option<Vec<String>>,
+    /// Extra arguments when restored at startup; see `config::Agent`.
+    pub resume_args: Option<Vec<String>>,
 }
 
 /// Index of the built-in shell launcher in [`launchers`].
@@ -233,11 +235,13 @@ pub fn launchers(agents: &[Agent]) -> Vec<Launcher> {
         name: "Shell".into(),
         command: None,
         task_args: None,
+        resume_args: None,
     })
     .chain(agents.iter().map(|a| Launcher {
         name: a.name.clone(),
         command: Some(a.command.clone()),
         task_args: a.task_args.clone(),
+        resume_args: a.resume_args.clone(),
     }))
     .collect()
 }
@@ -398,6 +402,7 @@ b", None
             name: "OpenCode".into(),
             command: "opencode".into(),
             task_args: None,
+            resume_args: None,
         }]);
         assert_eq!(l.len(), 2);
         assert_eq!(l[SHELL_LAUNCHER].name, "Shell");

@@ -59,6 +59,7 @@ struct RawBoard {
 #[serde(deny_unknown_fields)]
 struct RawUi {
     scanlines: Option<bool>,
+    restore_sessions: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -74,6 +75,7 @@ struct RawAgent {
     name: String,
     command: String,
     task_args: Option<Vec<String>>,
+    resume_args: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,6 +102,9 @@ pub struct Agent {
     pub command: String,
     /// Arguments that pass an initial prompt; contain [`PROMPT_PLACEHOLDER`].
     pub task_args: Option<Vec<String>>,
+    /// Arguments added when a session is restored at startup, to continue
+    /// the previous conversation (e.g. `["--continue"]`).
+    pub resume_args: Option<Vec<String>>,
 }
 
 /// An external task provider (see `docs/providers.md`).
@@ -146,6 +151,8 @@ pub struct Settings {
     pub workspaces: Vec<Workspace>,
     /// CRT-style scanlines over the terminal (on by default).
     pub scanlines: bool,
+    /// Reopen the sessions of the last run at startup (on by default).
+    pub restore_sessions: bool,
     /// Human readable warnings and errors for the sidebar.
     pub messages: Vec<String>,
     /// Where workspace changes made from the UI are saved.
@@ -162,6 +169,7 @@ impl Default for Settings {
             agents: Vec::new(),
             workspaces: Vec::new(),
             scanlines: true,
+            restore_sessions: true,
             messages: Vec::new(),
             config_path: None,
             home: None,
@@ -257,6 +265,7 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
     })?;
     let mut settings = Settings {
         scanlines: raw.ui.scanlines.unwrap_or(true),
+        restore_sessions: raw.ui.restore_sessions.unwrap_or(true),
         ..Settings::default()
     };
 
@@ -301,10 +310,21 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
             }
             None => None,
         };
+        let resume_args = match agent.resume_args {
+            Some(args) if args.iter().all(|a| valid_text(a)) => Some(args),
+            Some(_) => {
+                settings.messages.push(format!(
+                    "Agent '{name}': resume_args ignored, they must be non-empty single lines"
+                ));
+                None
+            }
+            None => None,
+        };
         settings.agents.push(Agent {
             name: name.into(),
             command: command.into(),
             task_args,
+            resume_args,
         });
     }
 
@@ -572,6 +592,7 @@ mod tests {
                 name: "Claude Code".into(),
                 command: "claude".into(),
                 task_args: None,
+                resume_args: None,
             }]
         );
         assert_eq!(s.workspaces.len(), 1);
@@ -663,6 +684,23 @@ mod tests {
         assert_eq!(s.workspaces.len(), 1);
         assert!(s.workspaces[0].projects.is_empty());
         assert_eq!(s.messages.len(), 3);
+    }
+
+    #[test]
+    fn restore_and_resume_args() {
+        let s = parse(
+            "[ui]\nrestore_sessions = false\n[[agents]]\nname = \"C\"\ncommand = \"c\"\nresume_args = [\"--continue\"]\n[[agents]]\nname = \"D\"\ncommand = \"d\"\nresume_args = [\"a\\nb\"]\n",
+            None,
+        )
+        .unwrap();
+        assert!(!s.restore_sessions);
+        assert_eq!(
+            s.agents[0].resume_args.as_deref(),
+            Some(&["--continue".to_string()][..])
+        );
+        assert_eq!(s.agents[1].resume_args, None);
+        assert_eq!(s.messages.len(), 1, "{:?}", s.messages);
+        assert!(parse("", None).unwrap().restore_sessions);
     }
 
     #[test]
