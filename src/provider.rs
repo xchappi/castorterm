@@ -40,7 +40,8 @@ pub fn resolve(command: &str, path_var: Option<&OsStr>, windows: bool) -> Option
     resolve_program(command, path_var)
 }
 
-/// Runs `program args... list --filter <filter>` and returns its stdout.
+/// Runs `program args... list --filter <filter> [--project <repo>]...` and
+/// returns its stdout.
 ///
 /// The working directory is the provider's own directory, never a project:
 /// a project may be an untrusted clone, and Windows searches the working
@@ -49,15 +50,17 @@ pub fn run_list(
     program: &Path,
     args: &[String],
     filter: &str,
+    projects: &[String],
     timeout: Duration,
 ) -> Result<String, String> {
-    run_list_limited(program, args, filter, timeout, MAX_OUTPUT)
+    run_list_limited(program, args, filter, projects, timeout, MAX_OUTPUT)
 }
 
 fn run_list_limited(
     program: &Path,
     args: &[String],
     filter: &str,
+    projects: &[String],
     timeout: Duration,
     max_output: usize,
 ) -> Result<String, String> {
@@ -65,6 +68,11 @@ fn run_list_limited(
     command
         .args(args)
         .args(["list", "--filter", filter])
+        .args(
+            projects
+                .iter()
+                .flat_map(|repo| ["--project", repo.as_str()]),
+        )
         .env("CASTORTERM_PROVIDER_PROTOCOL", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -253,8 +261,27 @@ mod tests {
             "echo {\"version\":1,\"tasks\":[{\"id\":\"%3\"}]}",
             "echo \"{\\\"version\\\":1,\\\"tasks\\\":[{\\\"id\\\":\\\"$3\\\"}]}\"",
         );
-        let out = run_list(&program, &[], "repo-x", TIMEOUT).unwrap();
+        let out = run_list(&program, &[], "repo-x", &[], TIMEOUT).unwrap();
         assert!(out.contains("\"id\":\"repo-x\""), "{out}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn passes_each_project_as_separate_arguments() {
+        let dir = temp_dir("projects");
+        // Arguments: list --filter <f> --project <a> --project <b>.
+        let program = script(
+            &dir,
+            "projects",
+            "echo {\"version\":1,\"tasks\":[{\"id\":\"%4=%5,%6=%7\"}]}",
+            "echo \"{\\\"version\\\":1,\\\"tasks\\\":[{\\\"id\\\":\\\"$4=$5,$6=$7\\\"}]}\"",
+        );
+        let projects = ["acme/app".to_string(), "acme/api".to_string()];
+        let out = run_list(&program, &[], "", &projects, TIMEOUT).unwrap();
+        assert!(
+            out.contains("--project=acme/app,--project=acme/api"),
+            "{out}"
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -267,7 +294,7 @@ mod tests {
             "echo token missing 1>&2\r\nexit /b 3",
             "echo token missing >&2\nexit 3",
         );
-        let err = run_list(&program, &[], "f", TIMEOUT).unwrap_err();
+        let err = run_list(&program, &[], "f", &[], TIMEOUT).unwrap_err();
         assert!(err.contains("token missing"), "{err}");
         fs::remove_dir_all(dir).unwrap();
     }
@@ -277,7 +304,7 @@ mod tests {
         let dir = temp_dir("slow");
         let program = script(&dir, "slow", "ping -n 6 127.0.0.1 >nul", "sleep 5");
         let started = Instant::now();
-        let err = run_list(&program, &[], "f", Duration::from_millis(500)).unwrap_err();
+        let err = run_list(&program, &[], "f", &[], Duration::from_millis(500)).unwrap_err();
         assert!(err.contains("timed out"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(4));
         let _ = fs::remove_dir_all(dir);
@@ -285,7 +312,7 @@ mod tests {
 
     #[test]
     fn missing_program_is_an_error() {
-        let err = run_list(Path::new("/definitely/not/here"), &[], "f", TIMEOUT).unwrap_err();
+        let err = run_list(Path::new("/definitely/not/here"), &[], "f", &[], TIMEOUT).unwrap_err();
         assert!(err.contains("could not start"), "{err}");
     }
 
@@ -317,7 +344,7 @@ mod tests {
             "i=0; while [ $i -lt 300 ]; do echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; i=$((i+1)); done",
         );
         let started = Instant::now();
-        let err = run_list_limited(&program, &[], "f", TIMEOUT, 1024).unwrap_err();
+        let err = run_list_limited(&program, &[], "f", &[], TIMEOUT, 1024).unwrap_err();
         assert!(err.contains("larger than"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(10));
         fs::remove_dir_all(dir).unwrap();
@@ -327,7 +354,7 @@ mod tests {
     fn runs_in_the_provider_directory() {
         let dir = temp_dir("cwd");
         let program = script(&dir, "cwd", "cd", "pwd");
-        let out = run_list(&program, &[], "f", TIMEOUT).unwrap();
+        let out = run_list(&program, &[], "f", &[], TIMEOUT).unwrap();
         let expected = fs::canonicalize(&dir).unwrap();
         let got = fs::canonicalize(out.trim()).unwrap();
         assert_eq!(got, expected);
@@ -350,7 +377,7 @@ wait",
                 pid_file.display()
             ),
         );
-        let err = run_list(&program, &[], "f", Duration::from_millis(500)).unwrap_err();
+        let err = run_list(&program, &[], "f", &[], Duration::from_millis(500)).unwrap_err();
         assert!(err.contains("timed out"), "{err}");
         let pid: i32 = fs::read_to_string(&pid_file)
             .unwrap()

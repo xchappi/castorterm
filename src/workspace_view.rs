@@ -363,6 +363,11 @@ impl WorkspaceView {
         let Some(config) = node.board.clone() else {
             return;
         };
+        let repos = board::workspace_repos(
+            node.projects
+                .iter()
+                .map(|&p| self.tree.projects[p].repo.as_deref()),
+        );
         // One provider process per board at a time.
         if self.boards.get(&workspace).is_some_and(|s| s.loading) {
             return;
@@ -390,6 +395,7 @@ impl WorkspaceView {
                         &program,
                         &config.provider.args,
                         &config.filter,
+                        &repos,
                         provider::TIMEOUT,
                     )?;
                     board::parse_listing(&stdout)
@@ -1063,9 +1069,22 @@ impl WorkspaceView {
                             .min_w(px(0.0))
                             .child(
                                 div()
+                                    .flex()
+                                    .gap_2()
                                     .text_size(px(SMALL_TEXT_SIZE))
                                     .text_color(rgb(MUTED))
-                                    .child(SharedString::from(task.id.clone())),
+                                    .child(SharedString::from(task.id.clone()))
+                                    .children(self.task_project_label(task, workspace).map(
+                                        |name| {
+                                            div()
+                                                .min_w(px(0.0))
+                                                .overflow_hidden()
+                                                .text_ellipsis()
+                                                .whitespace_nowrap()
+                                                .text_color(rgb(WORKSPACE))
+                                                .child(SharedString::from(name))
+                                        },
+                                    )),
                             )
                             .child(
                                 div()
@@ -1085,6 +1104,23 @@ impl WorkspaceView {
             row = row.child(self.render_task_details(task, workspace, cx));
         }
         row.into_any_element()
+    }
+
+    /// Project shown on a task row: only in workspaces with several
+    /// projects, the matched project's name or the provider's raw value.
+    fn task_project_label(&self, task: &BoardTask, workspace: usize) -> Option<String> {
+        let node = &self.tree.workspaces[workspace];
+        if node.projects.len() < 2 {
+            return None;
+        }
+        let projects = node.projects.iter().map(|&p| {
+            let project = &self.tree.projects[p];
+            (p, project.name.as_str(), project.repo.as_deref())
+        });
+        match board::match_project(task.project.as_deref(), projects) {
+            Some(p) => Some(self.tree.projects[p].name.clone()),
+            None => task.project.clone(),
+        }
     }
 
     fn render_task_details(

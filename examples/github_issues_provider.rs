@@ -12,12 +12,19 @@
 //!
 //! [[workspaces]]
 //! name = "My workspace"
-//! board = { provider = "github", filter = "owner/repo" }
+//! board = { provider = "github" }
+//!
+//! [[workspaces.projects]]
+//! name = "app"
+//! path = "~/src/app"
+//! repo = "owner/app"
 //! ```
 //!
-//! The filter is the repository (`owner/repo`). Open issues are reported as
-//! `backlog`, or `in_progress` when they have an assignee; recently closed
-//! ones as `done`.
+//! It lists the issues of every repository castorterm passes with
+//! `--project` (the `repo` of each workspace project), or of the filter
+//! (`owner/repo`) when there is none. Open issues are reported as `backlog`,
+//! or `in_progress` when they have an assignee; recently closed ones as
+//! `done`.
 
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
@@ -55,28 +62,75 @@ fn main() -> ExitCode {
     }
 }
 
+const USAGE: &str =
+    "usage: github_issues_provider list --filter <owner/repo> [--project <owner/repo>]...";
+
 fn run() -> Result<String, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let repo = match args.as_slice() {
-        [list, flag, repo] if list == "list" && flag == "--filter" => repo.clone(),
-        _ => return Err("usage: github_issues_provider list --filter <owner/repo>".into()),
-    };
-    if repo.is_empty() || repo.starts_with('-') {
-        return Err("the filter must be a repository like owner/repo".into());
-    }
+    let repos = repositories(&args)?;
 
     // Never run `gh` by bare name from an arbitrary working directory: on
     // Windows that would also search the current directory, which may be an
     // untrusted clone. Resolve it from absolute PATH entries and run it from
     // a neutral directory.
     let gh = find_gh().ok_or("gh (GitHub CLI) not found in PATH")?;
+    let mut tasks = Vec::new();
+    for repo in &repos {
+        tasks.extend(issues(&gh, repo, &id_prefix(repo, &repos))?);
+    }
+    Ok(json!({ "version": 1, "tasks": tasks }).to_string())
+}
+
+/// Repositories to list: every `--project`, or the filter when none is given.
+fn repositories(args: &[String]) -> Result<Vec<String>, String> {
+    let (filter, rest) = match args {
+        [list, flag, filter, rest @ ..] if list == "list" && flag == "--filter" => (filter, rest),
+        _ => return Err(USAGE.into()),
+    };
+    if rest.len() % 2 != 0 || rest.chunks(2).any(|pair| pair[0] != "--project") {
+        return Err(USAGE.into());
+    }
+    let mut repos: Vec<String> = rest.chunks(2).map(|pair| pair[1].clone()).collect();
+    if repos.is_empty() && !filter.is_empty() {
+        repos.push(filter.clone());
+    }
+    if repos.is_empty() {
+        return Err("no repository: set `repo` on the workspace projects or a filter".into());
+    }
+    if let Some(bad) = repos.iter().find(|r| r.is_empty() || r.starts_with('-')) {
+        return Err(format!("{bad:?} is not a repository like owner/repo"));
+    }
+    Ok(repos)
+}
+
+/// Ids must be unique across the listing: with several repositories they
+/// carry the repository name (`app#12`), or the full `owner/repo` when two
+/// repositories share a name.
+fn id_prefix(repo: &str, repos: &[String]) -> String {
+    if repos.len() < 2 {
+        return String::new();
+    }
+    let short = |r: &str| r.rsplit('/').next().unwrap_or(r).to_ascii_lowercase();
+    let shared = repos.iter().filter(|r| short(r) == short(repo)).count() > 1;
+    if shared {
+        repo.to_string()
+    } else {
+        repo.rsplit('/').next().unwrap_or(repo).to_string()
+    }
+}
+
+fn issues(
+    gh: &std::path::Path,
+    repo: &str,
+    prefix: &str,
+) -> Result<Vec<serde_json::Value>, String> {
     let output = Command::new(gh)
         .current_dir(std::env::temp_dir())
         .args([
             "issue",
             "list",
             "--repo",
-            &repo,
+            repo,
             "--state",
             "all",
             "--limit",
@@ -89,18 +143,18 @@ fn run() -> Result<String, String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
-            "gh failed: {}",
+            "gh failed for {repo}: {}",
             stderr.lines().next().unwrap_or("")
         ));
     }
     let issues: Vec<Issue> =
         serde_json::from_slice(&output.stdout).map_err(|e| format!("unexpected gh output: {e}"))?;
 
-    let tasks: Vec<_> = issues
+    Ok(issues
         .into_iter()
         .map(|issue| {
             json!({
-                "id": format!("#{}", issue.number),
+                "id": format!("{prefix}#{}", issue.number),
                 "title": issue.title,
                 "status": status(&issue),
                 "priority": priority(&issue),
@@ -108,8 +162,7 @@ fn run() -> Result<String, String> {
                 "url": issue.url,
             })
         })
-        .collect();
-    Ok(json!({ "version": 1, "tasks": tasks }).to_string())
+        .collect())
 }
 
 /// Absolute path of `gh`, searching only absolute `PATH` entries.

@@ -207,6 +207,18 @@ pub fn match_project<'a>(
         .map(|(index, _, _)| index)
 }
 
+/// Distinct repositories of a workspace's projects, in config order and
+/// ignoring ASCII case; passed to the provider as `--project` arguments.
+pub fn workspace_repos<'a>(repos: impl IntoIterator<Item = Option<&'a str>>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for repo in repos.into_iter().flatten() {
+        if !out.iter().any(|r| r.eq_ignore_ascii_case(repo)) {
+            out.push(repo.to_string());
+        }
+    }
+    out
+}
+
 /// Fills `{id}`, `{title}` and `{url}` in a prompt template.
 pub fn render_prompt(template: &str, task: &Task) -> String {
     let rendered = template
@@ -422,6 +434,15 @@ mod tests {
         assert_eq!(match_project(Some("stack"), iter()), Some(2));
         assert_eq!(match_project(Some("unknown"), iter()), None);
         assert_eq!(match_project(None, iter()), None);
+    }
+
+    #[test]
+    fn workspace_repos_are_distinct_and_ordered() {
+        assert_eq!(
+            workspace_repos([Some("acme/app"), None, Some("acme/api"), Some("ACME/App")]),
+            vec!["acme/app".to_string(), "acme/api".to_string()]
+        );
+        assert!(workspace_repos([None, None]).is_empty());
     }
 
     #[test]
