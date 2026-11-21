@@ -40,14 +40,14 @@ impl WorkspaceView {
         });
         // Same as the name field: the view takes the keyboard and the
         // terminals ignore input meanwhile.
-        self.input_gate.set_paused(true);
+        self.sync_input_gate();
         window.focus(&self.focus);
         cx.notify();
     }
 
     pub(super) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette = None;
-        self.input_gate.set_paused(false);
+        self.sync_input_gate();
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -150,8 +150,9 @@ impl WorkspaceView {
             .handle(&keystroke.key, keystroke.key_char.as_deref(), mods)
         {
             InputAction::Commit => {
-                let row = palette.selected;
-                self.run_palette_row(row, window, cx);
+                if let Some(&index) = palette.shown.get(palette.selected) {
+                    self.run_palette_entry(index, window, cx);
+                }
                 return;
             }
             InputAction::Cancel => {
@@ -163,23 +164,33 @@ impl WorkspaceView {
                     palette.input.insert(&text);
                 }
             }
-            InputAction::Changed | InputAction::Ignored => {}
+            InputAction::Changed => {}
+            // Left/Right, Tab...: nothing changed, keep the selection.
+            InputAction::Ignored => return,
         }
         palette.shown = commands::filter(&palette.entries, &palette.input.text);
         palette.selected = 0;
         cx.notify();
     }
 
-    /// Runs the action of row `row` of the shown entries and closes.
-    fn run_palette_row(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(action) = self.palette.as_ref().and_then(|p| {
-            p.shown
-                .get(row)
-                .and_then(|&i| p.entries.get(i))
-                .map(|e| e.action.clone())
-        }) else {
+    /// Runs entry `index` (of all entries) and closes the palette.
+    fn run_palette_entry(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(action) = self
+            .palette
+            .as_ref()
+            .and_then(|p| p.entries.get(index))
+            .map(|e| e.action.clone())
+        else {
             return;
         };
+        // Sessions can end while the palette is open.
+        if let Action::Activate(id) = action
+            && !self.tabs.iter().any(|t| t.id == id)
+        {
+            self.notice = Some("That session has ended".into());
+            cx.notify();
+            return;
+        }
         self.close_palette(window, cx);
         match action {
             Action::Launch { project, launcher } => {
@@ -251,7 +262,7 @@ impl WorkspaceView {
                         .child(SharedString::from(entry.detail.clone())),
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    this.run_palette_row(row, window, cx)
+                    this.run_palette_entry(index, window, cx)
                 }))
         });
         let empty = palette.shown.is_empty();
@@ -268,6 +279,8 @@ impl WorkspaceView {
                 .items_center()
                 .pt(px(90.0))
                 .bg(rgba(0x0000_0066))
+                // Clicks, hover and scroll never reach what is underneath.
+                .occlude()
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, window, cx| this.close_palette(window, cx)),

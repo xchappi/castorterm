@@ -51,7 +51,7 @@ impl WorkspaceView {
         // Keys still reach the root capture handler, which feeds the field;
         // the gate makes every terminal ignore input even if one regains
         // focus (a click on it, a tab switch).
-        self.input_gate.set_paused(true);
+        self.sync_input_gate();
         // Without focus GPUI dispatches no keys at all: focus the view.
         window.focus(&self.focus);
         cx.notify();
@@ -60,7 +60,7 @@ impl WorkspaceView {
     /// Closes the name field and gives the keyboard back to the terminal.
     pub(super) fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.editor = None;
-        self.input_gate.set_paused(false);
+        self.sync_input_gate();
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -313,7 +313,7 @@ impl WorkspaceView {
             Some(EditTarget::Rename(_))
         ) {
             self.editor = None;
-            self.input_gate.set_paused(false);
+            self.sync_input_gate();
         }
         if selected_here {
             self.select_fallback(cx);

@@ -353,6 +353,13 @@ impl WorkspaceView {
         opened.iter().any(Option::is_some)
     }
 
+    /// Terminals take input only while neither the name field nor the
+    /// palette owns the keyboard.
+    pub(crate) fn sync_input_gate(&self) {
+        self.input_gate
+            .set_paused(self.editor.is_some() || self.palette.is_some());
+    }
+
     /// Writes the open sessions (project and launcher) for the next start,
     /// only when they changed since the last write.
     fn save_state(&mut self) {
@@ -391,7 +398,7 @@ impl WorkspaceView {
     /// Gives keyboard focus to the active terminal and updates the title.
     fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
         // The name field keeps the keyboard until it closes.
-        if let (Some(tab), None) = (self.tabs.active(), &self.editor) {
+        if let (Some(tab), None, None) = (self.tabs.active(), &self.editor, &self.palette) {
             let handle = tab.handle.view.read(cx).focus_handle(cx);
             window.focus(&handle);
         }
@@ -668,7 +675,16 @@ impl WorkspaceView {
         }
         if self.palette.is_some() {
             cx.stop_propagation();
-            self.on_palette_key(event, window, cx);
+            let k = &event.keystroke;
+            let toggle = k.modifiers.control
+                && k.modifiers.shift
+                && !k.modifiers.alt
+                && k.key.eq_ignore_ascii_case("p");
+            if toggle {
+                self.close_palette(window, cx);
+            } else {
+                self.on_palette_key(event, window, cx);
+            }
             return;
         }
         let keystroke = &event.keystroke;

@@ -37,8 +37,10 @@ impl NameInput {
                     // Delete the last word.
                     let trimmed = self.text.trim_end().len();
                     let cut = self.text[..trimmed]
-                        .rfind(char::is_whitespace)
-                        .map(|i| i + 1)
+                        .char_indices()
+                        .rev()
+                        .find(|(_, c)| c.is_whitespace())
+                        .map(|(i, c)| i + c.len_utf8())
                         .unwrap_or(0);
                     self.text.truncate(cut);
                 } else {
@@ -124,6 +126,16 @@ mod tests {
         // Space without text (Windows).
         assert_eq!(input.handle("space", None, NONE), InputAction::Changed);
         assert_eq!(input.text, "@ ");
+    }
+
+    #[test]
+    fn ctrl_backspace_with_wide_whitespace() {
+        let mut input = NameInput::new("a\u{a0}b");
+        input.handle("backspace", None, CTRL);
+        assert_eq!(input.text, "a\u{a0}");
+        let mut input = NameInput::new("x\u{3000}yz");
+        input.handle("backspace", None, CTRL);
+        assert_eq!(input.text, "x\u{3000}");
     }
 
     #[test]
