@@ -116,6 +116,18 @@ Each launcher has its own colour (the shell is green, agents follow), used
 for its sessions in the sidebar, the tab bar and the frame of the active
 terminal.
 
+## Install (Windows)
+
+```powershell
+pwsh scripts/install-windows.ps1
+```
+
+Builds the release binary, installs it in `%LOCALAPPDATA%\Programs\castorterm`,
+adds it to your user `PATH` (agent hooks call `castorterm --status`) and
+creates a Start menu shortcut (`-Desktop` adds one on the desktop). Run it
+again to update. To pin it, right-click castorterm in Start and choose
+**Pin to taskbar** (Windows does not let programs pin themselves).
+
 ## Configuration
 
 Optional TOML file at `%APPDATA%\castorterm\config.toml` (Windows) or
