@@ -39,6 +39,11 @@ impl WorkspaceView {
             cx.notify();
             return;
         };
+        if !self.pending_worktrees.insert(dir.clone()) {
+            self.notice = Some(format!("Worktree {branch} is already being created"));
+            cx.notify();
+            return;
+        }
         self.notice = Some(format!("Creating worktree {branch}…"));
         cx.notify();
 
@@ -51,6 +56,7 @@ impl WorkspaceView {
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
+                this.pending_worktrees.remove(&dir);
                 if let Err(err) = result {
                     this.notice = Some(format!("Worktree not created: {err}"));
                     cx.notify();

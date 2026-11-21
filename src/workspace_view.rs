@@ -125,6 +125,8 @@ pub struct WorkspaceView {
     palette: Option<Palette>,
     /// Start agents on tasks in a git worktree of their own.
     task_worktree: bool,
+    /// Worktrees being created, so a double click starts only one.
+    pending_worktrees: std::collections::HashSet<PathBuf>,
     /// Focused while the name field or the palette owns the keyboard: keys
     /// then reach the root capture handler, and no terminal has focus.
     focus: FocusHandle,
@@ -189,6 +191,7 @@ impl WorkspaceView {
             palette: None,
             focus: cx.focus_handle(),
             task_worktree: false,
+            pending_worktrees: Default::default(),
         };
         if let Some(node) = this.tree.projects.get(initial_project) {
             this.expand_dir(node.path.clone(), cx);
