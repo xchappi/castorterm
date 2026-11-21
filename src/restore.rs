@@ -27,13 +27,52 @@ pub struct SavedSession {
     pub launcher: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SavedState {
     #[serde(default)]
     pub sessions: Vec<SavedSession>,
     /// Index of the active session in `sessions`.
     #[serde(default)]
     pub active: Option<usize>,
+    /// Window geometry of the last run.
+    #[serde(default)]
+    pub window: Option<SavedWindow>,
+}
+
+/// Window position and size (logical pixels); `maximized` restores it
+/// maximized, with these bounds for when it is restored down.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedWindow {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    #[serde(default)]
+    pub maximized: bool,
+}
+
+impl SavedWindow {
+    /// Smallest window worth restoring; smaller ones fall back to the default.
+    const MIN_WIDTH: f32 = 400.0;
+    const MIN_HEIGHT: f32 = 300.0;
+    const MAX: f32 = 20_000.0;
+    /// Part of the window that must be on a screen to restore it there.
+    const MIN_VISIBLE: f32 = 120.0;
+    /// Height of the title bar area that must stay reachable.
+    const TITLE_BAR: f32 = 40.0;
+
+    /// Plausible values (a hand-edited or corrupt file never makes an
+    /// unusable window).
+    pub fn is_sane(&self) -> bool {
+        let finite = [self.x, self.y, self.width, self.height]
+            .iter()
+            .all(|v| v.is_finite());
+        finite
+            && (Self::MIN_WIDTH..=Self::MAX).contains(&self.width)
+            && (Self::MIN_HEIGHT..=Self::MAX).contains(&self.height)
+            && self.x.abs() <= Self::MAX * 4.0
+            && self.y.abs() <= Self::MAX * 4.0
+    }
 }
 
 /// Reads the state; a missing, oversized or unreadable file is empty.
@@ -124,6 +163,49 @@ pub fn plan(
     (sessions, active)
 }
 
+impl SavedWindow {
+    /// Where to restore the window among `displays` (`x, y, width, height`):
+    /// on the display it overlaps most, with at least [`Self::MIN_VISIBLE`]
+    /// pixels visible each way and its title bar on that display, shrunk to
+    /// fit it. `None` when it is on no connected display.
+    pub fn place(&self, displays: &[(f32, f32, f32, f32)]) -> Option<SavedWindow> {
+        if !self.is_sane() {
+            return None;
+        }
+        let overlap = |&(dx, dy, dw, dh): &(f32, f32, f32, f32)| {
+            let w = (self.x + self.width).min(dx + dw) - self.x.max(dx);
+            let h = (self.y + self.height).min(dy + dh) - self.y.max(dy);
+            (w, h)
+        };
+        let &(dx, dy, dw, dh) = displays
+            .iter()
+            .filter(|d| {
+                let (w, h) = overlap(d);
+                let (_, dy, _, dh) = **d;
+                w >= Self::MIN_VISIBLE
+                    && h >= Self::MIN_VISIBLE
+                    && self.y >= dy
+                    && self.y <= dy + dh - Self::TITLE_BAR
+            })
+            .max_by(|a, b| {
+                let area = |d| {
+                    let (w, h) = overlap(d);
+                    w * h
+                };
+                area(a).total_cmp(&area(b))
+            })?;
+        let width = self.width.min(dw);
+        let height = self.height.min(dh);
+        Some(SavedWindow {
+            x: self.x.clamp(dx, dx + dw - width),
+            y: self.y.clamp(dy, dy + dh - height),
+            width,
+            height,
+            maximized: self.maximized,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,6 +257,7 @@ mod tests {
                 saved(&dir.join("b"), "Claude Code"),
             ],
             active: Some(3),
+            window: None,
         };
         let (sessions, active) = plan(&state, &tree, &launchers);
         assert_eq!(sessions, vec![(0, 0), (1, 1)]);
@@ -191,6 +274,7 @@ mod tests {
                 .map(|i| saved(&dir.join(if i == 0 { "a" } else { "b" }), "Shell"))
                 .collect(),
             active: Some(0),
+            window: None,
         };
         let (sessions, active) = plan(&state, &tree, &launchers);
         assert_eq!(sessions.len(), MAX_SESSIONS);
@@ -210,6 +294,74 @@ mod tests {
     }
 
     #[test]
+    fn window_geometry_sanity_and_round_trip() {
+        let ok = SavedWindow {
+            x: -1200.0,
+            y: 40.0,
+            width: 1360.0,
+            height: 820.0,
+            maximized: true,
+        };
+        assert!(ok.is_sane());
+        for bad in [
+            SavedWindow { width: 10.0, ..ok },
+            SavedWindow {
+                height: f32::NAN,
+                ..ok
+            },
+            SavedWindow { x: 1e9, ..ok },
+            SavedWindow { width: 1e7, ..ok },
+        ] {
+            assert!(!bad.is_sane(), "{bad:?}");
+        }
+        // Old files without a window still load.
+        let old: SavedState = serde_json::from_str(r#"{"sessions":[],"active":null}"#).unwrap();
+        assert_eq!(old.window, None);
+        let state = SavedState {
+            window: Some(ok),
+            ..SavedState::default()
+        };
+        let text = serde_json::to_string(&state).unwrap();
+        assert_eq!(serde_json::from_str::<SavedState>(&text).unwrap(), state);
+    }
+
+    #[test]
+    fn placement_on_connected_displays() {
+        let main = (0.0, 0.0, 1920.0, 1080.0);
+        let left = (-1366.0, 200.0, 1366.0, 768.0);
+        let w = |x, y, width, height| SavedWindow {
+            x,
+            y,
+            width,
+            height,
+            maximized: false,
+        };
+        // Fully on the main display: unchanged.
+        assert_eq!(
+            w(100.0, 100.0, 900.0, 600.0).place(&[main]),
+            Some(w(100.0, 100.0, 900.0, 600.0))
+        );
+        // On the left monitor (negative x).
+        assert!(
+            w(-1200.0, 300.0, 900.0, 600.0)
+                .place(&[main, left])
+                .is_some()
+        );
+        // That monitor unplugged.
+        assert_eq!(w(-1200.0, 300.0, 900.0, 600.0).place(&[main]), None);
+        // Only a sliver visible: not restored there.
+        assert_eq!(w(1900.0, 100.0, 900.0, 600.0).place(&[main]), None);
+        // Title bar above the screen: not restored.
+        assert_eq!(w(100.0, -500.0, 900.0, 600.0).place(&[main]), None);
+        // Bigger than the display: shrunk and kept on it.
+        let big = w(-1366.0, 200.0, 1920.0, 1080.0).place(&[left]).unwrap();
+        assert_eq!((big.width, big.height), (1366.0, 768.0));
+        assert_eq!((big.x, big.y), (-1366.0, 200.0));
+        // Insane values never place.
+        assert_eq!(w(f32::NAN, 0.0, 900.0, 600.0).place(&[main]), None);
+    }
+
+    #[test]
     fn save_load_and_bad_files() {
         let dir = std::env::temp_dir().join(format!("castorterm-restore-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -218,6 +370,7 @@ mod tests {
         let state = SavedState {
             sessions: vec![saved(Path::new("/p"), "Shell")],
             active: Some(0),
+            window: None,
         };
         save(&path, &state).unwrap();
         assert_eq!(load(&path), state);

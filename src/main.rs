@@ -28,8 +28,8 @@ mod workspace_view;
 mod worktree;
 
 use gpui::{
-    App, AppContext as _, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px,
-    size,
+    App, AppContext as _, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point,
+    px, size,
 };
 
 use crate::workspace_view::WorkspaceView;
@@ -90,14 +90,53 @@ fn main() {
     });
 }
 
+/// Geometry of the last run, placed on a connected screen (a monitor may
+/// have been unplugged since). Not used when restoring is turned off: the
+/// file is not kept up to date then.
+fn saved_window_bounds(settings: &config::Settings, cx: &App) -> Option<WindowBounds> {
+    if !settings.restore_sessions {
+        return None;
+    }
+    let path = settings
+        .config_path
+        .as_ref()?
+        .parent()?
+        .join(restore::FILE_NAME);
+    let displays: Vec<(f32, f32, f32, f32)> = cx
+        .displays()
+        .iter()
+        .map(|d| {
+            let b = d.bounds();
+            (
+                b.origin.x.into(),
+                b.origin.y.into(),
+                b.size.width.into(),
+                b.size.height.into(),
+            )
+        })
+        .collect();
+    let saved = restore::load(&path).window?.place(&displays)?;
+    let bounds = Bounds::new(
+        point(px(saved.x), px(saved.y)),
+        size(px(saved.width), px(saved.height)),
+    );
+    Some(if saved.maximized {
+        WindowBounds::Maximized(bounds)
+    } else {
+        WindowBounds::Windowed(bounds)
+    })
+}
+
 fn open_workspace_window(
     settings: config::Settings,
     launch_dir: std::path::PathBuf,
     cx: &mut App,
 ) -> anyhow::Result<()> {
-    let bounds = Bounds::centered(None, size(px(1360.0), px(820.0)), cx);
+    let window_bounds = saved_window_bounds(&settings, cx).unwrap_or_else(|| {
+        WindowBounds::Windowed(Bounds::centered(None, size(px(1360.0), px(820.0)), cx))
+    });
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_bounds: Some(window_bounds),
         titlebar: Some(TitlebarOptions {
             title: Some("castorterm".into()),
             ..Default::default()
