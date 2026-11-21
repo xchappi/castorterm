@@ -436,22 +436,30 @@ impl WorkspaceView {
         }
         self.statuses_loading = true;
         cx.spawn(async move |this, cx| {
-            let statuses = cx
+            let reads = cx
                 .background_spawn(async move {
                     files
                         .into_iter()
-                        .filter_map(|(id, f)| agent_status::read(&f).map(|s| (id, s)))
-                        .collect::<HashMap<_, _>>()
+                        .map(|(id, f)| (id, agent_status::read(&f)))
+                        .collect::<Vec<_>>()
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.statuses_loading = false;
-                let mut statuses = statuses;
-                statuses.retain(|id, _| this.tabs.iter().any(|t| t.id == *id));
-                let newly_waiting = statuses.iter().any(|(id, s)| {
-                    *s == AgentStatus::Waiting
-                        && this.statuses.get(id) != Some(&AgentStatus::Waiting)
-                });
+                let mut statuses = HashMap::new();
+                for (id, read) in reads {
+                    // Closed meanwhile: drop. Unreadable for a moment: keep
+                    // the last status, so it neither flickers nor re-alerts.
+                    if !this.tabs.iter().any(|t| t.id == id) {
+                        continue;
+                    }
+                    if let Some(status) = read.or_else(|| this.statuses.get(&id).copied()) {
+                        statuses.insert(id, status);
+                    }
+                }
+                let newly_waiting = statuses
+                    .iter()
+                    .any(|(id, s)| agent_status::newly_waiting(this.statuses.get(id).copied(), *s));
                 if newly_waiting {
                     this.attention_pending = true;
                 }
@@ -468,14 +476,9 @@ impl WorkspaceView {
     /// agent waits for the user.
     fn next_waiting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ids: Vec<SessionId> = self.tabs.iter().map(|t| t.id).collect();
-        let start = self
-            .tabs
-            .active_id()
-            .and_then(|a| ids.iter().position(|&i| i == a))
-            .map_or(0, |p| p + 1);
-        let next = (0..ids.len())
-            .map(|k| ids[(start + k) % ids.len()])
-            .find(|id| self.statuses.get(id) == Some(&AgentStatus::Waiting));
+        let next = agent_status::next_waiting(&ids, self.tabs.active_id(), |id| {
+            self.statuses.get(&id) == Some(&AgentStatus::Waiting)
+        });
         if let Some(id) = next {
             self.activate(id, window, cx);
         }

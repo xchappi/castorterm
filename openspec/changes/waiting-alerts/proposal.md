@@ -10,6 +10,8 @@ that waits takes clicks.
   until the window comes to the front (Windows; elsewhere nothing yet).
 - `Ctrl+Shift+J` activates the next session (after the active one, wrapping) whose agent waits.
 - The palette lists sessions with their status, waiting ones first.
+- A status that cannot be read for a moment keeps the last one (no flicker, no repeated alert).
+  A session first seen already waiting counts as newly waiting: its agent does wait for the user.
 
 ## Capabilities
 

@@ -50,6 +50,28 @@ impl AgentStatus {
     }
 }
 
+/// Whether a session should get the user's attention: its agent now waits
+/// and was not waiting before. A first observation that is already
+/// `waiting` counts: the agent does wait for the user.
+pub fn newly_waiting(previous: Option<AgentStatus>, next: AgentStatus) -> bool {
+    next == AgentStatus::Waiting && previous != Some(AgentStatus::Waiting)
+}
+
+/// Next id after `active` (wrapping, the active one last) for which
+/// `waiting` holds; the first such id when nothing is active.
+pub fn next_waiting<T: Copy + PartialEq>(
+    ids: &[T],
+    active: Option<T>,
+    waiting: impl Fn(T) -> bool,
+) -> Option<T> {
+    let start = active
+        .and_then(|a| ids.iter().position(|&i| i == a))
+        .map_or(0, |p| p + 1);
+    (0..ids.len())
+        .map(|k| ids[(start + k) % ids.len()])
+        .find(|&id| waiting(id))
+}
+
 /// Status file of session `key` of this castorterm process.
 pub fn file_for(dir: &Path, key: u64) -> PathBuf {
     dir.join(format!("{}-{key}.{EXTENSION}", std::process::id()))
@@ -144,6 +166,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn newly_waiting_transitions() {
+        use AgentStatus::*;
+        assert!(newly_waiting(Some(Working), Waiting));
+        assert!(newly_waiting(Some(Done), Waiting));
+        assert!(newly_waiting(None, Waiting));
+        assert!(!newly_waiting(Some(Waiting), Waiting));
+        assert!(!newly_waiting(Some(Waiting), Working));
+        assert!(!newly_waiting(None, Done));
+    }
+
+    #[test]
+    fn next_waiting_wraps_after_the_active_one() {
+        let ids = [1u64, 2, 3, 4];
+        let waiting = |set: &'static [u64]| move |id: u64| set.contains(&id);
+        assert_eq!(next_waiting(&ids, Some(2), waiting(&[1, 4])), Some(4));
+        assert_eq!(next_waiting(&ids, Some(4), waiting(&[1, 4])), Some(1));
+        // Only the active one waits: it is found last.
+        assert_eq!(next_waiting(&ids, Some(3), waiting(&[3])), Some(3));
+        assert_eq!(next_waiting(&ids, Some(3), waiting(&[])), None);
+        assert_eq!(next_waiting(&ids, None, waiting(&[2, 3])), Some(2));
+        assert_eq!(next_waiting::<u64>(&[], None, |_| true), None);
     }
 
     #[test]

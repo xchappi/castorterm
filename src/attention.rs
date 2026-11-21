@@ -16,6 +16,7 @@ pub fn request(window: &Window) {
 fn flash(window: &Window) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
+    /// FLASHWINFO from winuser.h.
     #[repr(C)]
     struct FlashWInfo {
         size: u32,
@@ -24,6 +25,13 @@ fn flash(window: &Window) {
         count: u32,
         timeout: u32,
     }
+    // Layout checked at compile time against the Win32 definition.
+    #[cfg(target_pointer_width = "64")]
+    const _: () = {
+        assert!(std::mem::offset_of!(FlashWInfo, hwnd) == 8);
+        assert!(std::mem::offset_of!(FlashWInfo, flags) == 16);
+        assert!(std::mem::size_of::<FlashWInfo>() == 32);
+    };
     #[link(name = "user32")]
     unsafe extern "system" {
         fn FlashWindowEx(info: *const FlashWInfo) -> i32;
