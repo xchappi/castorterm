@@ -14,6 +14,7 @@ use gpui::{
 
 mod command_palette;
 mod manage;
+mod task_worktree;
 use command_palette::Palette;
 use manage::{EditTarget, NameEditor};
 
@@ -122,6 +123,8 @@ pub struct WorkspaceView {
     saved_state: Option<SavedState>,
     /// Command palette, while open.
     palette: Option<Palette>,
+    /// Start agents on tasks in a git worktree of their own.
+    task_worktree: bool,
     /// Focused while the name field or the palette owns the keyboard: keys
     /// then reach the root capture handler, and no terminal has focus.
     focus: FocusHandle,
@@ -185,6 +188,7 @@ impl WorkspaceView {
             saved_state: None,
             palette: None,
             focus: cx.focus_handle(),
+            task_worktree: false,
         };
         if let Some(node) = this.tree.projects.get(initial_project) {
             this.expand_dir(node.path.clone(), cx);
@@ -643,7 +647,11 @@ impl WorkspaceView {
             .unwrap_or(self.selected_project);
         let prompt = board::render_prompt(&config.prompt, task);
         let line = board::agent_command(command, task_args, &prompt, cfg!(windows));
-        self.launch_with(project, launcher, Some(line), window, cx);
+        if self.task_worktree {
+            self.start_in_worktree(project, launcher, &task.id, line, window, cx);
+        } else {
+            self.launch_with(project, launcher, Some(line), window, cx);
+        }
     }
 
     /// Types the path of `file` into the active session (not executed).
@@ -1571,6 +1579,27 @@ impl WorkspaceView {
                     .child("Open link")
                     .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.open_url(&url)))
             }))
+            .when(has_buttons, |d| {
+                let on = self.task_worktree;
+                let branch = format!("task/{}", crate::worktree::slug(&task.id));
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("worktree-toggle:{}", task.id)))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .pt_1()
+                        .cursor_pointer()
+                        .text_color(rgb(if on { ACCENT } else { MUTED }))
+                        .hover(|s| s.text_color(rgb(TEXT)))
+                        .child(if on { "[x]" } else { "[ ]" })
+                        .child(SharedString::from(format!("In a new worktree ({branch})")))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.task_worktree = !this.task_worktree;
+                            cx.notify();
+                        })),
+                )
+            })
             .child(div().flex().flex_wrap().gap_1().pt_1().children(buttons))
             .when(!has_buttons, |d| {
                 d.child("Add task_args to an agent to start it on tasks.")

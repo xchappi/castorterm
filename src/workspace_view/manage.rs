@@ -334,7 +334,7 @@ impl WorkspaceView {
     }
 
     /// Config entries for every project of `workspace`.
-    fn entries(&self, workspace: usize) -> Vec<ProjectEntry> {
+    pub(super) fn entries(&self, workspace: usize) -> Vec<ProjectEntry> {
         self.tree.workspaces[workspace]
             .projects
             .iter()
@@ -347,7 +347,7 @@ impl WorkspaceView {
 
     /// Saves `edit` to the config file; on failure the change stays for this
     /// run and the sidebar says why. Returns whether it was saved.
-    fn persist(&mut self, edit: &Edit) -> bool {
+    pub(super) fn persist(&mut self, edit: &Edit) -> bool {
         self.notice = match &self.config_path {
             None => Some("Changes are not saved: no config directory is known".into()),
             Some(path) => config_edit::save(path, edit, self.home.as_deref())
