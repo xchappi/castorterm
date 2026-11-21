@@ -247,9 +247,12 @@ mod tests {
         assert!(local(PathBuf::from("relative/x")).is_some());
 
         let dir = temp_dir("unc");
-        std::fs::write(dir.join(".git"), "gitdir: \\\\127.0.0.1\\share\\repo\n").unwrap();
-        assert_eq!(git_dir(&dir), None);
-        std::fs::remove_file(dir.join(".git")).unwrap();
+        // Backslashes only make a UNC path on Windows.
+        if cfg!(windows) {
+            std::fs::write(dir.join(".git"), "gitdir: \\\\127.0.0.1\\share\\repo\n").unwrap();
+            assert_eq!(git_dir(&dir), None);
+            std::fs::remove_file(dir.join(".git")).unwrap();
+        }
         // A local gitdir whose commondir points to the network.
         std::fs::create_dir_all(dir.join("gd")).unwrap();
         std::fs::write(dir.join(".git"), "gitdir: gd\n").unwrap();
