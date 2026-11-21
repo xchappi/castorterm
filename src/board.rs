@@ -155,7 +155,7 @@ fn label(text: &str) -> String {
 
 /// Control characters and invisible formatting characters (bidi overrides,
 /// zero-width characters) that could hide or reorder displayed text.
-fn is_hidden(c: char) -> bool {
+pub(crate) fn is_hidden(c: char) -> bool {
     c.is_control()
         || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
 }

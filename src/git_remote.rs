@@ -27,7 +27,8 @@ pub fn detect_repo(dir: &Path) -> Option<String> {
 const MAX_BRANCH_CHARS: usize = 60;
 
 /// Current branch of the repository at `dir`, or the short commit id when
-/// HEAD is detached. Same safety rules as [`detect_repo`].
+/// HEAD is detached. Same safety rules as [`detect_repo`]; a project on a
+/// network path shows no branch (it is polled every few seconds).
 pub fn current_branch(dir: &Path) -> Option<String> {
     let head = read_local(dir, &own_git_dir(dir)?.join("HEAD"))?;
     let head = head.lines().next()?.trim();
@@ -44,9 +45,11 @@ pub fn current_branch(dir: &Path) -> Option<String> {
         }
         None => return None,
     };
+    // Git allows any Unicode in branch names: drop invisible and bidi
+    // characters so a crafted name cannot fake what is shown.
     let name: String = name
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|&c| !crate::board::is_hidden(c))
         .take(MAX_BRANCH_CHARS)
         .collect();
     (!name.is_empty()).then_some(name)
@@ -65,7 +68,9 @@ fn git_dir(dir: &Path) -> Option<PathBuf> {
 /// The `.git` directory of this checkout (where `HEAD` lives): a directory,
 /// or a file with `gitdir: <path>` (worktrees and submodules).
 fn own_git_dir(dir: &Path) -> Option<PathBuf> {
-    let dot_git = dir.join(".git");
+    // Checked before any disk access: even a stat of a UNC path sends
+    // the user's credentials to its host.
+    let dot_git = local(dir.join(".git"))?;
     let meta = std::fs::symlink_metadata(&dot_git).ok()?;
     let git_dir = if meta.is_dir() {
         dot_git
@@ -80,10 +85,64 @@ fn own_git_dir(dir: &Path) -> Option<PathBuf> {
     Some(git_dir)
 }
 
-/// `path` if it is on a local drive (not UNC, not a device path).
+/// Whether `dir` is on a fixed local disk. On Windows mapped network
+/// drives and removable media are skipped by the periodic branch refresh:
+/// they can be slow or reach the network. Elsewhere always true.
+pub fn on_fixed_drive(dir: &Path) -> bool {
+    if local(dir.to_path_buf()).is_none() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        let Some(Component::Prefix(prefix)) = dir.components().next() else {
+            return false;
+        };
+        let letter = match prefix.kind() {
+            Prefix::Disk(l) | Prefix::VerbatimDisk(l) => l as char,
+            _ => return false,
+        };
+        let root: Vec<u16> = format!("{letter}:\\").encode_utf16().chain([0]).collect();
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetDriveTypeW(root: *const u16) -> u32;
+        }
+        const DRIVE_FIXED: u32 = 3;
+        // SAFETY: `root` is a NUL-terminated UTF-16 string that outlives the call.
+        unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_FIXED }
+    }
+    #[cfg(not(windows))]
+    true
+}
+
+/// Names Windows maps to devices in any folder (`CON`, `NUL.txt`...).
+fn is_device_name(part: &std::ffi::OsStr) -> bool {
+    let name = part.to_string_lossy();
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_ascii_uppercase();
+    matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+        && stem.len() == 4
+        && stem.as_bytes()[3].is_ascii_digit())
+}
+
+/// `path` if it is on a local drive (not UNC, not a device path, no
+/// reserved device names on Windows).
 fn local(path: PathBuf) -> Option<PathBuf> {
     let text = path.to_string_lossy();
     if text.starts_with("\\\\") || text.starts_with("//") {
+        return None;
+    }
+    if cfg!(windows)
+        && path
+            .components()
+            .any(|c| matches!(c, Component::Normal(part) if is_device_name(part)))
+    {
         return None;
     }
     match path.components().next() {
@@ -333,6 +392,40 @@ mod tests {
         assert!(!goes_through_link(&dir, &dir.join("missing/x")));
         let _ = std::fs::remove_dir_all(dir);
         let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn branch_names_are_cleaned_and_capped() {
+        let dir = temp_dir("branch-clean");
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(
+            dir.join(".git/HEAD"),
+            "ref: refs/heads/a\u{202E}b\u{200B}c\r\n",
+        )
+        .unwrap();
+        assert_eq!(current_branch(&dir).as_deref(), Some("abc"));
+        let long = "x".repeat(MAX_BRANCH_CHARS * 2);
+        std::fs::write(dir.join(".git/HEAD"), format!("ref: refs/heads/{long}\n")).unwrap();
+        assert_eq!(
+            current_branch(&dir).unwrap().chars().count(),
+            MAX_BRANCH_CHARS
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn network_and_device_paths_are_never_touched() {
+        assert_eq!(current_branch(Path::new("//127.0.0.1/share/proj")), None);
+        assert!(!on_fixed_drive(Path::new("//127.0.0.1/share/proj")));
+        if cfg!(windows) {
+            assert_eq!(current_branch(Path::new(r"\\127.0.0.1\share\proj")), None);
+            assert!(is_device_name(std::ffi::OsStr::new("con")));
+            assert!(is_device_name(std::ffi::OsStr::new("NUL.txt")));
+            assert!(is_device_name(std::ffi::OsStr::new("COM1")));
+            assert!(!is_device_name(std::ffi::OsStr::new("console")));
+            assert_eq!(local(PathBuf::from(r"C:\repo\CON\x")), None);
+            assert!(on_fixed_drive(&std::env::temp_dir()));
+        }
     }
 
     #[test]

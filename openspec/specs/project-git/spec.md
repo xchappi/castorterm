@@ -24,10 +24,23 @@ of the commit id. Projects that are not git checkouts SHALL show no branch.
 - **WHEN** a project folder has no `.git`
 - **THEN** no branch is shown and nothing fails
 
+#### Scenario: Network or removable drive
+- **WHEN** a project is on a UNC path, a mapped network drive or removable media
+- **THEN** no branch is shown and the periodic refresh never touches that path
+
+#### Scenario: Branch name with invisible characters
+- **WHEN** a branch name contains bidi or zero-width characters
+- **THEN** they are removed from the name shown
+
+#### Scenario: Transient read failure
+- **WHEN** reading `HEAD` fails once while git rewrites it
+- **THEN** the last known branch stays on screen
+
 ### Requirement: Safe git reading
 The branch SHALL be read from git's files without starting any process, following `gitdir:` only
-to local paths, never through a symlink or junction inside the project folder, and reading at most
-1 MiB per file.
+to local paths, never through a symlink or junction (any reparse point, including cloud files)
+inside the project folder, never through reserved Windows device names, and reading at most 1 MiB
+per file. A `gitdir:` that points outside the project folder is only checked for being local.
 
 #### Scenario: Network gitdir
 - **WHEN** a project's `.git` file says `gitdir: \\host\share\repo`

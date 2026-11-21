@@ -387,16 +387,33 @@ impl WorkspaceView {
             .collect();
         self.branches_loading = true;
         cx.spawn(async move |this, cx| {
-            let branches = cx
+            // (project, branch, still a repository): a failed read of a
+            // repository (git rewriting HEAD, an antivirus) keeps the last
+            // known branch instead of flickering.
+            let reads = cx
                 .background_spawn(async move {
                     projects
                         .into_iter()
-                        .filter_map(|(p, path)| git_remote::current_branch(&path).map(|b| (p, b)))
-                        .collect::<HashMap<_, _>>()
+                        // Network and removable drives can be slow; skip them.
+                        .filter(|(_, path)| git_remote::on_fixed_drive(path))
+                        .map(|(p, path)| {
+                            let branch = git_remote::current_branch(&path);
+                            let repo = branch.is_some()
+                                || std::fs::symlink_metadata(path.join(".git")).is_ok();
+                            (p, branch, repo)
+                        })
+                        .collect::<Vec<_>>()
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.branches_loading = false;
+                let mut branches = HashMap::new();
+                for (project, branch, repo) in reads {
+                    let known = || this.branches.get(&project).cloned();
+                    if let Some(branch) = branch.or_else(|| repo.then(known).flatten()) {
+                        branches.insert(project, branch);
+                    }
+                }
                 if this.branches != branches {
                     this.branches = branches;
                     cx.notify();
