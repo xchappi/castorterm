@@ -7,12 +7,14 @@ use std::time::{Duration, Instant};
 
 use futures::channel::mpsc;
 use gpui::{
-    AnyElement, BoxShadow, ClickEvent, Context, Div, ElementId, Entity, ExternalPaths,
+    AnyElement, BoxShadow, ClickEvent, Context, Div, ElementId, Entity, ExternalPaths, FocusHandle,
     Focusable as _, FontWeight, KeyDownEvent, Rgba, SharedString, Stateful, Subscription, Window,
     div, linear_color_stop, linear_gradient, point, prelude::*, px, rgb, rgba,
 };
 
+mod command_palette;
 mod manage;
+use command_palette::Palette;
 use manage::{EditTarget, NameEditor};
 
 use crate::board::{self, Status, Task as BoardTask};
@@ -53,7 +55,7 @@ const BOARD_TICK: Duration = Duration::from_secs(5);
 
 /// Content of the middle column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MiddleTab {
+pub(super) enum MiddleTab {
     Files,
     Quests,
 }
@@ -118,6 +120,11 @@ pub struct WorkspaceView {
     state_path: Option<PathBuf>,
     /// Last state written, to skip identical writes.
     saved_state: Option<SavedState>,
+    /// Command palette, while open.
+    palette: Option<Palette>,
+    /// Focused while the name field or the palette owns the keyboard: keys
+    /// then reach the root capture handler, and no terminal has focus.
+    focus: FocusHandle,
 }
 
 impl WorkspaceView {
@@ -176,6 +183,8 @@ impl WorkspaceView {
             shown_title: String::new(),
             state_path: None,
             saved_state: None,
+            palette: None,
+            focus: cx.focus_handle(),
         };
         if let Some(node) = this.tree.projects.get(initial_project) {
             this.expand_dir(node.path.clone(), cx);
@@ -344,6 +353,13 @@ impl WorkspaceView {
         opened.iter().any(Option::is_some)
     }
 
+    /// Terminals take input only while neither the name field nor the
+    /// palette owns the keyboard.
+    pub(crate) fn sync_input_gate(&self) {
+        self.input_gate
+            .set_paused(self.editor.is_some() || self.palette.is_some());
+    }
+
     /// Writes the open sessions (project and launcher) for the next start,
     /// only when they changed since the last write.
     fn save_state(&mut self) {
@@ -382,7 +398,7 @@ impl WorkspaceView {
     /// Gives keyboard focus to the active terminal and updates the title.
     fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
         // The name field keeps the keyboard until it closes.
-        if let (Some(tab), None) = (self.tabs.active(), &self.editor) {
+        if let (Some(tab), None, None) = (self.tabs.active(), &self.editor, &self.palette) {
             let handle = tab.handle.view.read(cx).focus_handle(cx);
             window.focus(&handle);
         }
@@ -651,10 +667,24 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The name field takes every key while it is open.
+        // The name field and the palette take every key while open.
         if self.editor.is_some() {
             cx.stop_propagation();
             self.on_editor_key(event, window, cx);
+            return;
+        }
+        if self.palette.is_some() {
+            cx.stop_propagation();
+            let k = &event.keystroke;
+            let toggle = k.modifiers.control
+                && k.modifiers.shift
+                && !k.modifiers.alt
+                && k.key.eq_ignore_ascii_case("p");
+            if toggle {
+                self.close_palette(window, cx);
+            } else {
+                self.on_palette_key(event, window, cx);
+            }
             return;
         }
         let keystroke = &event.keystroke;
@@ -703,6 +733,7 @@ impl WorkspaceView {
                     self.pick_folders(workspace, window, cx);
                 }
             }
+            Shortcut::Palette => self.open_palette(window, cx),
         }
     }
 
@@ -1794,7 +1825,9 @@ impl Render for WorkspaceView {
             .font_family(UI_FONT)
             .text_size(px(TEXT_SIZE))
             .text_color(rgb(TEXT))
+            .track_focus(&self.focus)
             .capture_key_down(cx.listener(Self::on_key_capture))
+            .relative()
             .child(self.render_hud())
             .child(
                 div()
@@ -1817,6 +1850,7 @@ impl Render for WorkspaceView {
                             .child(div().flex_1().min_h(px(0.0)).w_full().child(terminal)),
                     ),
             )
+            .children(self.render_palette(cx))
     }
 }
 
