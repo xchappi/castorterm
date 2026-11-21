@@ -73,6 +73,16 @@ pub fn file_color(name: &str) -> u32 {
     }
 }
 
+/// Colour of a task priority chip: P0 red, P1 orange, P2 yellow, else muted.
+pub fn priority_color(priority: &str) -> u32 {
+    match priority.trim().to_ascii_uppercase().as_str() {
+        "P0" => ERROR,
+        "P1" => 0xff9f1c,
+        "P2" => WORKSPACE,
+        _ => MUTED,
+    }
+}
+
 /// 0xRRGGBB plus an alpha byte, as 0xRRGGBBAA for `gpui::rgba`.
 pub fn with_alpha(color: u32, alpha: u8) -> u32 {
     ((color & 0xff_ffff) << 8) | alpha as u32
@@ -111,6 +121,14 @@ mod tests {
         assert_eq!(file_color("logo.svg"), 0xff4fb0);
         assert_eq!(file_color("LICENSE"), MUTED);
         assert_eq!(file_color(".gitignore"), MUTED);
+    }
+
+    #[test]
+    fn priority_colors() {
+        assert_eq!(priority_color("P0"), ERROR);
+        assert_eq!(priority_color(" p1 "), 0xff9f1c);
+        assert_eq!(priority_color("P2"), WORKSPACE);
+        assert_eq!(priority_color("low"), MUTED);
     }
 
     #[test]

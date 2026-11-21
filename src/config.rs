@@ -14,6 +14,13 @@ pub const CONFIG_ENV: &str = "CASTORTERM_CONFIG";
 const MIN_FONT_SIZE: f32 = 6.0;
 const MAX_FONT_SIZE: f32 = 72.0;
 
+/// Placeholder replaced by the task prompt in an agent's `task_args`.
+pub const PROMPT_PLACEHOLDER: &str = "{prompt}";
+/// Prompt used when a board does not define one.
+pub const DEFAULT_PROMPT: &str = "Work on task {id}: {title}";
+const DEFAULT_REFRESH_SECS: u64 = 60;
+const MIN_REFRESH_SECS: u64 = 15;
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
@@ -25,6 +32,27 @@ struct RawConfig {
     workspaces: Vec<RawWorkspace>,
     #[serde(default)]
     ui: RawUi,
+    #[serde(default)]
+    providers: Vec<RawProvider>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProvider {
+    name: String,
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBoard {
+    provider: String,
+    #[serde(default)]
+    filter: String,
+    prompt: Option<String>,
+    refresh_secs: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -45,12 +73,14 @@ struct RawFont {
 struct RawAgent {
     name: String,
     command: String,
+    task_args: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawWorkspace {
     name: String,
+    board: Option<RawBoard>,
     #[serde(default)]
     projects: Vec<RawProject>,
 }
@@ -60,6 +90,7 @@ struct RawWorkspace {
 struct RawProject {
     name: String,
     path: String,
+    repo: Option<String>,
 }
 
 /// An agent launcher: a command typed into a fresh shell.
@@ -67,17 +98,41 @@ struct RawProject {
 pub struct Agent {
     pub name: String,
     pub command: String,
+    /// Arguments that pass an initial prompt; contain [`PROMPT_PLACEHOLDER`].
+    pub task_args: Option<Vec<String>>,
+}
+
+/// An external task provider (see `docs/providers.md`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Provider {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+/// Task board of a workspace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Board {
+    pub provider: Provider,
+    /// Opaque to castorterm; passed to the provider as `--filter`.
+    pub filter: String,
+    /// Prompt template with `{id}`, `{title}` and `{url}`.
+    pub prompt: String,
+    pub refresh_secs: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Project {
     pub name: String,
     pub path: PathBuf,
+    /// Repository identifier used to match tracker tasks (e.g. `owner/repo`).
+    pub repo: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Workspace {
     pub name: String,
+    pub board: Option<Board>,
     pub projects: Vec<Project>,
 }
 
@@ -216,9 +271,47 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
             ));
             continue;
         }
+        let task_args = match agent.task_args {
+            Some(args)
+                if args.iter().any(|a| a.contains(PROMPT_PLACEHOLDER))
+                    && args.iter().all(|a| !a.chars().any(char::is_control)) =>
+            {
+                Some(args)
+            }
+            Some(_) => {
+                settings.messages.push(format!(
+                    "Agent '{name}': task_args ignored, they must contain {PROMPT_PLACEHOLDER} and no control characters"
+                ));
+                None
+            }
+            None => None,
+        };
         settings.agents.push(Agent {
             name: name.into(),
             command: command.into(),
+            task_args,
+        });
+    }
+
+    let mut providers: Vec<Provider> = Vec::new();
+    for provider in raw.providers {
+        let name = provider.name.trim();
+        let command = provider.command.trim();
+        let args_ok = provider
+            .args
+            .iter()
+            .all(|a| !a.chars().any(char::is_control));
+        if !valid_text(name) || !valid_text(command) || !args_ok {
+            settings.messages.push(format!(
+                "Provider '{}' skipped: name, command and args must be single lines",
+                name.escape_debug()
+            ));
+            continue;
+        }
+        providers.push(Provider {
+            name: name.into(),
+            command: command.into(),
+            args: provider.args,
         });
     }
 
@@ -230,6 +323,9 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
                 .push("Workspace skipped: name must be a non-empty single line".into());
             continue;
         }
+        let board = workspace.board.and_then(|board| {
+            parse_board(board, workspace_name, &providers, &mut settings.messages)
+        });
         let mut projects = Vec::new();
         for project in workspace.projects {
             let name = project.name.trim();
@@ -243,6 +339,10 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
                 Some(path) if path.is_absolute() => projects.push(Project {
                     name: name.into(),
                     path,
+                    repo: project
+                        .repo
+                        .map(|r| r.trim().to_string())
+                        .filter(|r| valid_text(r)),
                 }),
                 _ => settings.messages.push(format!(
                     "Project '{}' skipped: path '{}' must be absolute",
@@ -252,11 +352,54 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
         }
         settings.workspaces.push(Workspace {
             name: workspace_name.into(),
+            board,
             projects,
         });
     }
 
     Ok(settings)
+}
+
+/// Validates a workspace board against the defined providers.
+fn parse_board(
+    raw: RawBoard,
+    workspace: &str,
+    providers: &[Provider],
+    messages: &mut Vec<String>,
+) -> Option<Board> {
+    let Some(provider) = providers.iter().find(|p| p.name == raw.provider.trim()) else {
+        messages.push(format!(
+            "Workspace '{workspace}': board ignored, provider '{}' is not defined",
+            raw.provider
+        ));
+        return None;
+    };
+    let prompt = raw
+        .prompt
+        .map(|p| p.trim().to_string())
+        .unwrap_or_else(|| DEFAULT_PROMPT.to_string());
+    if !valid_text(&prompt) || raw.filter.chars().any(char::is_control) {
+        messages.push(format!(
+            "Workspace '{workspace}': board ignored, prompt and filter must be single lines"
+        ));
+        return None;
+    }
+    let refresh_secs = match raw.refresh_secs {
+        Some(secs) if secs < MIN_REFRESH_SECS => {
+            messages.push(format!(
+                "Workspace '{workspace}': refresh_secs raised to the minimum of {MIN_REFRESH_SECS}"
+            ));
+            MIN_REFRESH_SECS
+        }
+        Some(secs) => secs,
+        None => DEFAULT_REFRESH_SECS,
+    };
+    Some(Board {
+        provider: provider.clone(),
+        filter: raw.filter.trim().to_string(),
+        prompt,
+        refresh_secs,
+    })
 }
 
 /// Non-empty and free of control characters: commands are typed into the
@@ -376,7 +519,8 @@ mod tests {
             s.agents,
             vec![Agent {
                 name: "Claude Code".into(),
-                command: "claude".into()
+                command: "claude".into(),
+                task_args: None,
             }]
         );
         assert_eq!(s.workspaces.len(), 1);
@@ -385,7 +529,8 @@ mod tests {
             s.workspaces[0].projects,
             vec![Project {
                 name: "castorterm".into(),
-                path: PathBuf::from(path)
+                path: PathBuf::from(path),
+                repo: None,
             }]
         );
         assert!(s.messages.is_empty());
@@ -474,6 +619,56 @@ mod tests {
         assert!(parse("", None).unwrap().scanlines);
         assert!(!parse("[ui]\nscanlines = false", None).unwrap().scanlines);
         assert!(parse("[ui]\nglow = true", None).is_err());
+    }
+
+    #[test]
+    fn boards_providers_and_task_args() {
+        let text = r#"
+            [[providers]]
+            name = "tasks"
+            command = "tasks-provider"
+            args = ["--profile", "work"]
+
+            [[agents]]
+            name = "Claude Code"
+            command = "claude"
+            task_args = ["{prompt}"]
+
+            [[agents]]
+            name = "Bad"
+            command = "bad"
+            task_args = ["--no-placeholder"]
+
+            [[workspaces]]
+            name = "W"
+            board = { provider = "tasks", filter = "repo:x/*", refresh_secs = 5 }
+            [[workspaces.projects]]
+            name = "p"
+            path = "/p"
+            repo = "x/p"
+
+            [[workspaces]]
+            name = "V"
+            board = { provider = "missing" }
+        "#;
+        let home = PathBuf::from(abs("/home/me", "C:/Users/me"));
+        let text = text.replace("\"/p\"", &format!("{:?}", abs("/p", "C:/p")));
+        let s = parse(&text, Some(&home)).unwrap();
+        assert_eq!(
+            s.agents[0].task_args.as_deref(),
+            Some(&["{prompt}".to_string()][..])
+        );
+        assert_eq!(s.agents[1].task_args, None);
+        let board = s.workspaces[0].board.as_ref().unwrap();
+        assert_eq!(board.provider.command, "tasks-provider");
+        assert_eq!(board.provider.args, ["--profile", "work"]);
+        assert_eq!(board.filter, "repo:x/*");
+        assert_eq!(board.prompt, DEFAULT_PROMPT);
+        assert_eq!(board.refresh_secs, MIN_REFRESH_SECS);
+        assert_eq!(s.workspaces[0].projects[0].repo.as_deref(), Some("x/p"));
+        assert_eq!(s.workspaces[1].board, None);
+        // Bad task_args, low refresh and unknown provider are reported.
+        assert_eq!(s.messages.len(), 3, "{:?}", s.messages);
     }
 
     #[test]

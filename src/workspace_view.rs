@@ -1,14 +1,19 @@
 //! Root view: sidebar (Workspace -> Project -> Session), tab bar and the
 //! active terminal.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use futures::channel::mpsc;
 use gpui::{
-    BoxShadow, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, FontWeight,
+    AnyElement, BoxShadow, ClickEvent, Context, Div, ElementId, Entity, Focusable as _, FontWeight,
     KeyDownEvent, Rgba, SharedString, Stateful, Subscription, Window, div, linear_color_stop,
     linear_gradient, point, prelude::*, px, rgb, rgba,
 };
+
+use crate::board::{self, Status, Task as BoardTask};
+use crate::provider;
 
 use crate::config::Settings;
 use crate::files::{self, FileTree, Row, path_for_terminal};
@@ -20,7 +25,7 @@ use crate::tabs::{SessionId, Tabs};
 use crate::theme::{
     ACCENT, BORDER, ERROR, HUD_BG, LOGO_FONT, LOGO_TEXT_SIZE, MUTED, PANEL_BG, SMALL_TEXT_SIZE,
     TEXT, TEXT_SIZE, TITLE, TITLE_TEXT_SIZE, UI_FONT, WORKSPACE, file_color, label, launcher_color,
-    with_alpha,
+    priority_color, with_alpha,
 };
 use crate::tree::{Launcher, ProjectTree, SHELL_LAUNCHER, launchers};
 use crate::view::{TerminalEvent, TerminalStyle, TerminalView};
@@ -37,6 +42,26 @@ const INITIAL_GRID: GridSize = GridSize {
     cols: 100,
     rows: 30,
 };
+
+/// How often the board timer checks whether a refresh is due.
+const BOARD_TICK: Duration = Duration::from_secs(5);
+
+/// Content of the middle column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MiddleTab {
+    Files,
+    Quests,
+}
+
+/// Board of one workspace, as last loaded.
+#[derive(Default)]
+struct BoardState {
+    listing: Option<Result<board::Listing, String>>,
+    loading: bool,
+    /// Latest refresh issued; older results are dropped.
+    ticket: u64,
+    loaded_at: Option<Instant>,
+}
 
 /// An open session: its terminal view and the subscription to its events.
 struct OpenSession {
@@ -59,6 +84,14 @@ pub struct WorkspaceView {
     selected_project: usize,
     files: FileTree,
     show_files: bool,
+    middle_tab: MiddleTab,
+    /// Boards by workspace index.
+    boards: HashMap<usize, BoardState>,
+    next_board_ticket: u64,
+    /// Task whose details and agent buttons are shown.
+    selected_task: Option<String>,
+    show_done: bool,
+    _board_timer: gpui::Task<()>,
 }
 
 impl WorkspaceView {
@@ -71,6 +104,18 @@ impl WorkspaceView {
     ) -> Self {
         let mut tree = ProjectTree::from_config(&settings.workspaces);
         let initial_project = tree.project_for_dir(&launch_dir);
+        // Refreshes the visible board when it is due; stops with the view.
+        let board_timer = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(BOARD_TICK).await;
+                if this
+                    .update(cx, |this, cx| this.refresh_board_if_due(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         let mut this = Self {
             tree,
             launchers: launchers(&settings.agents),
@@ -85,6 +130,12 @@ impl WorkspaceView {
             selected_project: initial_project,
             files: FileTree::default(),
             show_files: true,
+            middle_tab: MiddleTab::Files,
+            boards: HashMap::new(),
+            next_board_ticket: 0,
+            selected_task: None,
+            show_done: false,
+            _board_timer: board_timer,
         };
         if let Some(node) = this.tree.projects.get(initial_project) {
             this.expand_dir(node.path.clone(), cx);
@@ -98,6 +149,19 @@ impl WorkspaceView {
         &mut self,
         project: usize,
         launcher: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.launch_with(project, launcher, None, window, cx);
+    }
+
+    /// Like [`Self::launch`], typing `typed` instead of the launcher's own
+    /// command (used to pass a task prompt to an agent).
+    fn launch_with(
+        &mut self,
+        project: usize,
+        launcher: usize,
+        typed: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -125,7 +189,7 @@ impl WorkspaceView {
                 return;
             }
         };
-        if let Some(command) = &launcher.command {
+        if let Some(command) = typed.or(launcher.command.clone()) {
             // The PTY buffers this until the shell reads its input.
             session.write(format!("{command}\r").into_bytes());
         }
@@ -250,6 +314,127 @@ impl WorkspaceView {
             })
             .detach();
         }
+    }
+
+    /// Workspace that contains the selected project.
+    fn selected_workspace(&self) -> Option<usize> {
+        self.tree
+            .workspaces
+            .iter()
+            .position(|w| w.projects.contains(&self.selected_project))
+    }
+
+    fn show_tab(&mut self, tab: MiddleTab, cx: &mut Context<Self>) {
+        self.middle_tab = tab;
+        self.refresh_board_if_due(cx);
+        cx.notify();
+    }
+
+    /// Loads the visible board if it was never loaded or `refresh_secs` passed.
+    fn refresh_board_if_due(&mut self, cx: &mut Context<Self>) {
+        if !self.show_files || self.middle_tab != MiddleTab::Quests {
+            return;
+        }
+        let Some(workspace) = self.selected_workspace() else {
+            return;
+        };
+        let Some(config) = self.tree.workspaces[workspace].board.as_ref() else {
+            return;
+        };
+        let every = Duration::from_secs(config.refresh_secs);
+        let due = self.boards.get(&workspace).is_none_or(|state| {
+            !state.loading && state.loaded_at.is_none_or(|at| at.elapsed() >= every)
+        });
+        if due {
+            self.load_board(workspace, cx);
+        }
+    }
+
+    /// Runs the workspace's provider on a background thread.
+    fn load_board(&mut self, workspace: usize, cx: &mut Context<Self>) {
+        let Some(node) = self.tree.workspaces.get(workspace) else {
+            return;
+        };
+        let Some(config) = node.board.clone() else {
+            return;
+        };
+        let cwd = node
+            .projects
+            .first()
+            .map(|&p| self.tree.projects[p].path.clone());
+        self.next_board_ticket += 1;
+        let ticket = self.next_board_ticket;
+        let state = self.boards.entry(workspace).or_default();
+        state.loading = true;
+        state.ticket = ticket;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let path_var = std::env::var_os("PATH");
+                    let program = provider::resolve(
+                        &config.provider.command,
+                        path_var.as_deref(),
+                        cfg!(windows),
+                    )
+                    .ok_or_else(|| {
+                        format!("provider '{}' not found in PATH", config.provider.command)
+                    })?;
+                    let stdout = provider::run_list(
+                        &program,
+                        &config.provider.args,
+                        &config.filter,
+                        cwd.as_deref(),
+                        provider::TIMEOUT,
+                    )?;
+                    board::parse_listing(&stdout)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let state = this.boards.entry(workspace).or_default();
+                if state.ticket == ticket {
+                    state.listing = Some(result);
+                    state.loading = false;
+                    state.loaded_at = Some(Instant::now());
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Opens a session of `launcher` on `task`, in the task's project when it
+    /// matches one of the workspace, otherwise in the selected project.
+    fn start_task(
+        &mut self,
+        task: &BoardTask,
+        launcher: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.selected_workspace() else {
+            return;
+        };
+        let node = &self.tree.workspaces[workspace];
+        let Some(config) = node.board.as_ref() else {
+            return;
+        };
+        let Some(agent) = self.launchers.get(launcher) else {
+            return;
+        };
+        let (Some(command), Some(task_args)) = (&agent.command, &agent.task_args) else {
+            return;
+        };
+        let projects = node.projects.iter().map(|&p| {
+            let project = &self.tree.projects[p];
+            (p, project.name.as_str(), project.repo.as_deref())
+        });
+        let project = board::match_project(task.project.as_deref(), projects)
+            .unwrap_or(self.selected_project);
+        let prompt = board::render_prompt(&config.prompt, task);
+        let line = board::agent_command(command, task_args, &prompt, cfg!(windows));
+        self.launch_with(project, launcher, Some(line), window, cx);
     }
 
     /// Types the path of `file` into the active session (not executed).
@@ -543,7 +728,109 @@ impl WorkspaceView {
             .workspaces
             .iter()
             .find(|w| w.projects.contains(&self.selected_project));
-        let mut rows = Vec::new();
+        let quests = self.middle_tab == MiddleTab::Quests;
+
+        let tab = |id: &'static str, text: &'static str, tab: MiddleTab| {
+            let active = self.middle_tab == tab;
+            div()
+                .id(id)
+                .px_2()
+                .py(px(2.0))
+                .rounded_md()
+                .cursor_pointer()
+                .text_color(rgb(if active { TEXT } else { MUTED }))
+                .when(active, |d| d.bg(rgba(with_alpha(ACCENT, 0x22))))
+                .when(!active, |d| d.hover(|s| s.text_color(rgb(TEXT))))
+                .child(text)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.show_tab(tab, cx)))
+        };
+
+        let header = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_2()
+            .py_2()
+            .text_size(px(SMALL_TEXT_SIZE))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(tab("tab-files", "FILES", MiddleTab::Files))
+                    .child(tab("tab-quests", "QUESTS", MiddleTab::Quests)),
+            )
+            .child(
+                div()
+                    .id("refresh-middle")
+                    .px_2()
+                    .rounded_md()
+                    .text_color(rgb(MUTED))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgba(with_alpha(ACCENT, 0x22))).text_color(rgb(ACCENT)))
+                    .child("Refresh")
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| match this.middle_tab {
+                            MiddleTab::Files => {
+                                let dirs = this.files.expanded_dirs();
+                                this.load_dirs(dirs, cx);
+                            }
+                            MiddleTab::Quests => {
+                                if let Some(workspace) = this.selected_workspace() {
+                                    this.load_board(workspace, cx);
+                                }
+                            }
+                        }),
+                    ),
+            );
+
+        let workspace_label = workspace.map(|w| {
+            div()
+                .px_3()
+                .pb_1()
+                .text_size(px(SMALL_TEXT_SIZE))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(WORKSPACE))
+                .child(SharedString::from(label(&w.name)))
+        });
+
+        let rows = if quests {
+            self.render_quest_rows(cx)
+        } else {
+            self.render_file_rows(cx)
+        };
+
+        div()
+            .flex_none()
+            .w(px(EXPLORER_WIDTH))
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(EXPLORER_BG))
+            .border_r_1()
+            .border_color(rgb(BORDER))
+            .child(header)
+            .children(workspace_label)
+            .child(
+                div()
+                    .id("explorer-list")
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .pb_2()
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
+    }
+
+    fn render_file_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let workspace = self
+            .tree
+            .workspaces
+            .iter()
+            .find(|w| w.projects.contains(&self.selected_project));
+        let mut rows: Vec<AnyElement> = Vec::new();
         if let Some(workspace) = workspace {
             for &project in &workspace.projects {
                 let node = &self.tree.projects[project];
@@ -557,115 +844,292 @@ impl WorkspaceView {
                         .child(SharedString::from(node.name.clone()))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.toggle_dir(root.clone(), cx);
-                        })),
+                        }))
+                        .into_any_element(),
                 );
                 for row in self.files.rows(&node.path) {
-                    rows.push(match row {
-                        Row::Entry {
-                            depth,
-                            entry,
-                            expanded,
-                        } => {
-                            let path = entry.path.clone();
-                            let base = tree_row(
-                                row_id("entry", &path),
-                                depth + 1,
-                                if entry.is_dir { chevron(expanded) } else { "" },
-                            );
-                            if entry.is_dir {
-                                base.text_color(rgb(TEXT))
-                                    .child(SharedString::from(entry.name))
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        this.toggle_dir(path.clone(), cx);
-                                    }))
-                            } else {
-                                base.text_color(rgb(file_color(&entry.name)))
-                                    .child(SharedString::from(entry.name))
-                                    .on_click(cx.listener(
-                                        move |this, _: &ClickEvent, window, cx| {
-                                            this.insert_path(&path, window, cx)
-                                        },
-                                    ))
+                    rows.push(
+                        match row {
+                            Row::Entry {
+                                depth,
+                                entry,
+                                expanded,
+                            } => {
+                                let path = entry.path.clone();
+                                let base = tree_row(
+                                    row_id("entry", &path),
+                                    depth + 1,
+                                    if entry.is_dir { chevron(expanded) } else { "" },
+                                );
+                                if entry.is_dir {
+                                    base.text_color(rgb(TEXT))
+                                        .child(SharedString::from(entry.name))
+                                        .on_click(cx.listener(
+                                            move |this, _: &ClickEvent, _, cx| {
+                                                this.toggle_dir(path.clone(), cx);
+                                            },
+                                        ))
+                                } else {
+                                    base.text_color(rgb(file_color(&entry.name)))
+                                        .child(SharedString::from(entry.name))
+                                        .on_click(cx.listener(
+                                            move |this, _: &ClickEvent, window, cx| {
+                                                this.insert_path(&path, window, cx)
+                                            },
+                                        ))
+                                }
+                            }
+                            Row::Loading { depth, dir } => {
+                                tree_row(row_id("loading", &dir), depth + 1, "")
+                                    .text_color(rgb(MUTED))
+                                    .child("Loading…")
+                            }
+                            Row::Error {
+                                depth,
+                                dir,
+                                message,
+                            } => tree_row(row_id("error", &dir), depth + 1, "")
+                                .text_color(rgb(ERROR))
+                                .child(SharedString::from(format!("Cannot read: {message}"))),
+                            Row::More { depth, dir, count } => {
+                                tree_row(row_id("more", &dir), depth + 1, "")
+                                    .text_color(rgb(MUTED))
+                                    .child(SharedString::from(format!("… {count} more")))
                             }
                         }
-                        Row::Loading { depth, dir } => {
-                            tree_row(row_id("loading", &dir), depth + 1, "")
-                                .text_color(rgb(MUTED))
-                                .child("Loading…")
-                        }
-                        Row::Error {
-                            depth,
-                            dir,
-                            message,
-                        } => tree_row(row_id("error", &dir), depth + 1, "")
-                            .text_color(rgb(ERROR))
-                            .child(SharedString::from(format!("Cannot read: {message}"))),
-                        Row::More { depth, dir, count } => {
-                            tree_row(row_id("more", &dir), depth + 1, "")
-                                .text_color(rgb(MUTED))
-                                .child(SharedString::from(format!("… {count} more")))
-                        }
-                    });
+                        .into_any_element(),
+                    );
                 }
             }
         }
 
-        let header = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_between()
-            .px_3()
-            .py_2()
-            .child(
+        rows
+    }
+
+    fn render_quest_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let note = |text: String, color: u32| {
+            div()
+                .px_3()
+                .py_1()
+                .text_size(px(SMALL_TEXT_SIZE))
+                .text_color(rgb(color))
+                .child(SharedString::from(text))
+                .into_any_element()
+        };
+        let Some(workspace) = self.selected_workspace() else {
+            return Vec::new();
+        };
+        let Some(config) = self.tree.workspaces[workspace].board.as_ref() else {
+            return vec![note(
+                "No board for this workspace. Add a provider and a board to it in config.toml (see docs/providers.md).".into(),
+                MUTED,
+            )];
+        };
+        let mut rows = Vec::new();
+        let state = self.boards.get(&workspace);
+        if state.is_none_or(|s| s.loading) {
+            rows.push(note(
+                format!("Loading from {}…", config.provider.name),
+                MUTED,
+            ));
+        }
+        let listing = match state.and_then(|s| s.listing.as_ref()) {
+            None => return rows,
+            Some(Err(message)) => {
+                rows.push(note(message.clone(), ERROR));
+                return rows;
+            }
+            Some(Ok(listing)) => listing,
+        };
+        if listing.skipped > 0 {
+            rows.push(note(
+                format!(
+                    "{} task(s) skipped: invalid data from the provider",
+                    listing.skipped
+                ),
+                ERROR,
+            ));
+        }
+        if listing.tasks.is_empty() {
+            rows.push(note("No tasks.".into(), MUTED));
+        }
+
+        for (status, tasks) in board::group(&listing.tasks) {
+            let collapsible = status == Status::Done;
+            let collapsed = collapsible && !self.show_done;
+            let color = status_color(status);
+            rows.push(
                 div()
+                    .id(SharedString::from(format!(
+                        "quest-group-{}",
+                        status.label()
+                    )))
                     .flex()
                     .items_center()
                     .gap_2()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
                     .text_size(px(SMALL_TEXT_SIZE))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child(div().text_color(rgb(MUTED)).child("FILES"))
-                    .children(workspace.map(|w| {
-                        div()
-                            .text_color(rgb(WORKSPACE))
-                            .child(SharedString::from(label(&w.name)))
-                    })),
-            )
-            .child(
-                div()
-                    .id("refresh-files")
-                    .px_2()
-                    .rounded_md()
-                    .text_size(px(SMALL_TEXT_SIZE))
-                    .text_color(rgb(MUTED))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgba(with_alpha(ACCENT, 0x22))).text_color(rgb(ACCENT)))
-                    .child("Refresh")
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        let dirs = this.files.expanded_dirs();
-                        this.load_dirs(dirs, cx);
-                    })),
+                    .text_color(rgb(color))
+                    .when(collapsible, |d| {
+                        d.cursor_pointer()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.show_done = !this.show_done;
+                                cx.notify();
+                            }))
+                    })
+                    .child(dot(color, 6.0, status == Status::InProgress))
+                    .child(SharedString::from(format!(
+                        "{} {}{}",
+                        label(status.label()),
+                        tasks.len(),
+                        if collapsible {
+                            if collapsed { " ▸" } else { " ▾" }
+                        } else {
+                            ""
+                        }
+                    )))
+                    .into_any_element(),
             );
+            if collapsed {
+                continue;
+            }
+            for task in tasks {
+                rows.push(self.render_task(task, workspace, cx));
+            }
+        }
+        rows
+    }
 
-        div()
-            .flex_none()
-            .w(px(EXPLORER_WIDTH))
-            .h_full()
+    fn render_task(
+        &self,
+        task: &BoardTask,
+        workspace: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selected = self.selected_task.as_deref() == Some(task.id.as_str());
+        let id = task.id.clone();
+        let mut row = div()
             .flex()
             .flex_col()
-            .bg(rgb(EXPLORER_BG))
-            .border_r_1()
-            .border_color(rgb(BORDER))
-            .child(header)
+            .mx_2()
+            .rounded_md()
+            .when(selected, |d| d.bg(rgba(with_alpha(TEXT, 0x0f))))
             .child(
                 div()
-                    .id("explorer-list")
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .pb_2()
-                    .overflow_y_scroll()
-                    .children(rows),
-            )
+                    .id(SharedString::from(format!("quest:{}", task.id)))
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .px_2()
+                    .py(px(4.0))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgba(with_alpha(TEXT, 0x0d))))
+                    .children(task.priority.as_ref().map(|p| {
+                        let color = priority_color(p);
+                        div()
+                            .flex_none()
+                            .px_1()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgba(with_alpha(color, 0x80)))
+                            .text_size(px(SMALL_TEXT_SIZE))
+                            .text_color(rgb(color))
+                            .child(SharedString::from(p.clone()))
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .text_size(px(SMALL_TEXT_SIZE))
+                                    .text_color(rgb(MUTED))
+                                    .child(SharedString::from(task.id.clone())),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(TEXT))
+                                    .child(SharedString::from(task.title.clone())),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.selected_task =
+                            match this.selected_task.as_deref() == Some(id.as_str()) {
+                                true => None,
+                                false => Some(id.clone()),
+                            };
+                        cx.notify();
+                    })),
+            );
+        if selected {
+            row = row.child(self.render_task_details(task, workspace, cx));
+        }
+        row.into_any_element()
+    }
+
+    fn render_task_details(
+        &self,
+        task: &BoardTask,
+        workspace: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let node = &self.tree.workspaces[workspace];
+        let projects = node.projects.iter().map(|&p| {
+            let project = &self.tree.projects[p];
+            (p, project.name.as_str(), project.repo.as_deref())
+        });
+        let project = board::match_project(task.project.as_deref(), projects);
+        let project_text = match project {
+            Some(p) => format!("Project: {}", self.tree.projects[p].name),
+            None => format!(
+                "Project: {} (selected)",
+                self.tree.projects[self.selected_project].name
+            ),
+        };
+        let buttons = self
+            .launchers
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.task_args.is_some())
+            .map(|(index, launcher)| {
+                let task = task.clone();
+                launcher_button(
+                    (SharedString::from(format!("start:{}", task.id)), index),
+                    format!("+ {}", launcher.name),
+                    launcher_color(index),
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.start_task(&task, index, window, cx)
+                }))
+            })
+            .collect::<Vec<_>>();
+        let has_buttons = !buttons.is_empty();
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_2()
+            .pb_2()
+            .text_size(px(SMALL_TEXT_SIZE))
+            .text_color(rgb(MUTED))
+            .child(SharedString::from(project_text))
+            .children(task.url.clone().map(|url| {
+                div()
+                    .id(SharedString::from(format!("quest-link:{}", task.id)))
+                    .text_color(rgb(ACCENT))
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(rgb(TEXT)))
+                    .child("Open link")
+                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| cx.open_url(&url)))
+            }))
+            .child(div().flex().flex_wrap().gap_1().pt_1().children(buttons))
+            .when(!has_buttons, |d| {
+                d.child("Add task_args to an agent to start it on tasks.")
+            })
     }
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -750,6 +1214,16 @@ impl WorkspaceView {
             .bg(rgb(PANEL_BG))
             .text_size(px(TEXT_SIZE))
             .children(tabs)
+    }
+}
+
+/// Colour of a board group.
+fn status_color(status: Status) -> u32 {
+    match status {
+        Status::InProgress => ACCENT,
+        Status::Review => TITLE,
+        Status::Ready => 0x39ff8e,
+        Status::Backlog | Status::Done => MUTED,
     }
 }
 

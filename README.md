@@ -39,6 +39,13 @@ The window has three columns:
   path into the active session, ready to reference in an agent prompt.
 - **Sessions** (right): tabs and the active terminal.
 
+The middle column also has a **Quests** tab: the task board of the
+workspace, loaded from an external **provider** (GitHub Issues, your own
+tracker...). Select a task to open its link or start an agent on it in the
+right project, with the task as its prompt. Providers are small programs
+that print JSON; see [docs/providers.md](docs/providers.md) and the GitHub
+Issues example in [`examples/`](examples/).
+
 | Shortcut | Action |
 |---|---|
 | `Ctrl+Shift+T` | New shell in the current project |

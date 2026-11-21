@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::{Agent, Workspace};
+use crate::config::{Agent, Board, Workspace};
 
 /// Name of the implicit workspace for a launch directory outside the config.
 pub const LOCAL_WORKSPACE: &str = "Local";
@@ -11,6 +11,8 @@ pub const LOCAL_WORKSPACE: &str = "Local";
 pub struct ProjectNode {
     pub name: String,
     pub path: PathBuf,
+    /// Repository identifier used to match tracker tasks.
+    pub repo: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,6 +22,8 @@ pub struct WorkspaceNode {
     pub projects: Vec<usize>,
     /// Created by castorterm for directories outside the config.
     pub implicit: bool,
+    /// Task board shown in the Quests tab.
+    pub board: Option<Board>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -36,12 +40,14 @@ impl ProjectTree {
                 name: workspace.name.clone(),
                 projects: Vec::new(),
                 implicit: false,
+                board: workspace.board.clone(),
             };
             for project in &workspace.projects {
                 node.projects.push(tree.projects.len());
                 tree.projects.push(ProjectNode {
                     name: project.name.clone(),
                     path: project.path.clone(),
+                    repo: project.repo.clone(),
                 });
             }
             tree.workspaces.push(node);
@@ -63,6 +69,7 @@ impl ProjectTree {
         self.projects.push(ProjectNode {
             name,
             path: dir.to_path_buf(),
+            repo: None,
         });
         match self.workspaces.iter_mut().find(|w| w.implicit) {
             Some(local) => local.projects.push(index),
@@ -70,6 +77,7 @@ impl ProjectTree {
                 name: LOCAL_WORKSPACE.into(),
                 projects: vec![index],
                 implicit: true,
+                board: None,
             }),
         }
         index
@@ -90,6 +98,8 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 pub struct Launcher {
     pub name: String,
     pub command: Option<String>,
+    /// How to pass an initial prompt (agents only); see `config::Agent`.
+    pub task_args: Option<Vec<String>>,
 }
 
 /// Index of the built-in shell launcher in [`launchers`].
@@ -100,10 +110,12 @@ pub fn launchers(agents: &[Agent]) -> Vec<Launcher> {
     std::iter::once(Launcher {
         name: "Shell".into(),
         command: None,
+        task_args: None,
     })
     .chain(agents.iter().map(|a| Launcher {
         name: a.name.clone(),
         command: Some(a.command.clone()),
+        task_args: a.task_args.clone(),
     }))
     .collect()
 }
@@ -117,19 +129,23 @@ mod tests {
         ProjectTree::from_config(&[
             Workspace {
                 name: "CastorLabs".into(),
+                board: None,
                 projects: vec![
                     Project {
                         name: "here".into(),
                         path: path.to_path_buf(),
+                        repo: None,
                     },
                     Project {
                         name: "other".into(),
                         path: path.join("does-not-exist"),
+                        repo: None,
                     },
                 ],
             },
             Workspace {
                 name: "Empty".into(),
+                board: None,
                 projects: vec![],
             },
         ])
@@ -176,6 +192,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let mut tree = ProjectTree::from_config(&[Workspace {
             name: LOCAL_WORKSPACE.into(),
+            board: None,
             projects: vec![],
         }]);
         tree.project_for_dir(&dir);
@@ -189,6 +206,7 @@ mod tests {
         let l = launchers(&[Agent {
             name: "OpenCode".into(),
             command: "opencode".into(),
+            task_args: None,
         }]);
         assert_eq!(l.len(), 2);
         assert_eq!(l[SHELL_LAUNCHER].name, "Shell");

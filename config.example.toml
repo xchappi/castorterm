@@ -20,6 +20,8 @@ scanlines = true
 [[agents]]
 name = "Claude Code"
 command = "claude"
+# Optional: how to pass a task as the initial prompt (Quests tab).
+task_args = ["{prompt}"]
 
 [[agents]]
 name = "OpenCode"
@@ -27,12 +29,19 @@ command = "opencode"
 
 # Workspaces group projects in the sidebar. Paths must be absolute; a
 # leading ~ is expanded to your home directory.
+# Task providers for the Quests tab (see docs/providers.md).
+[[providers]]
+name = "github"
+command = "github_issues_provider"
+
 [[workspaces]]
 name = "CastorLabs"
+board = { provider = "github", filter = "xchappi/castorterm", prompt = "Work on task {id}: {title}", refresh_secs = 60 }
 
 [[workspaces.projects]]
 name = "castorterm"
 path = "~/src/castorterm"
+repo = "xchappi/castorterm"
 
 [[workspaces.projects]]
 name = "website"
