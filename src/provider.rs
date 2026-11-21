@@ -40,6 +40,23 @@ pub fn resolve(command: &str, path_var: Option<&OsStr>, windows: bool) -> Option
     resolve_program(command, path_var)
 }
 
+/// Spawns `command`, retrying briefly on Linux's "Text file busy": a script
+/// that was just written (or is being updated) can be briefly unexecutable
+/// while another process still holds it open for writing.
+fn spawn_retrying(command: &mut Command) -> std::io::Result<std::process::Child> {
+    const ETXTBSY: i32 = 26;
+    let mut attempts = 0;
+    loop {
+        match command.spawn() {
+            Err(err) if cfg!(unix) && err.raw_os_error() == Some(ETXTBSY) && attempts < 10 => {
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+}
+
 /// Runs `program args... list --filter <filter> [--project <repo>]...` and
 /// returns its stdout.
 ///
@@ -93,8 +110,7 @@ fn run_list_limited(
         command.process_group(0);
     }
 
-    let mut child = command
-        .spawn()
+    let mut child = spawn_retrying(&mut command)
         .map_err(|e| format!("could not start provider {}: {e}", program.display()))?;
     let stdout = read_in_background(child.stdout.take(), max_output);
     let stderr = read_in_background(child.stderr.take(), MAX_STDERR);
