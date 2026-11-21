@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod files;
 mod keys;
 mod palette;
 mod session;
@@ -67,7 +68,7 @@ fn open_workspace_window(
     launch_dir: std::path::PathBuf,
     cx: &mut App,
 ) -> anyhow::Result<()> {
-    let bounds = Bounds::centered(None, size(px(1200.0), px(720.0)), cx);
+    let bounds = Bounds::centered(None, size(px(1360.0), px(820.0)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {

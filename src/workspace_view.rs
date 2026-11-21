@@ -1,7 +1,7 @@
 //! Root view: sidebar (Workspace -> Project -> Session), tab bar and the
 //! active terminal.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use futures::channel::mpsc;
 use gpui::{
@@ -11,6 +11,7 @@ use gpui::{
 };
 
 use crate::config::Settings;
+use crate::files::{FileTree, Row, path_for_terminal};
 use crate::keys::Mods;
 use crate::palette::DEFAULT_THEME;
 use crate::session::{GridSize, Session};
@@ -18,12 +19,17 @@ use crate::shortcuts::{Shortcut, match_shortcut};
 use crate::tabs::{SessionId, Tabs};
 use crate::theme::{
     ACCENT, BORDER, ERROR, HUD_BG, LOGO_FONT, LOGO_TEXT_SIZE, MUTED, PANEL_BG, SMALL_TEXT_SIZE,
-    TEXT, TEXT_SIZE, TITLE, TITLE_TEXT_SIZE, UI_FONT, WORKSPACE, label, launcher_color, with_alpha,
+    TEXT, TEXT_SIZE, TITLE, TITLE_TEXT_SIZE, UI_FONT, WORKSPACE, file_color, label, launcher_color,
+    with_alpha,
 };
 use crate::tree::{Launcher, ProjectTree, SHELL_LAUNCHER, launchers};
 use crate::view::{TerminalEvent, TerminalStyle, TerminalView};
 
-const SIDEBAR_WIDTH: f32 = 260.0;
+const SIDEBAR_WIDTH: f32 = 220.0;
+const EXPLORER_WIDTH: f32 = 260.0;
+const EXPLORER_BG: u32 = 0x0e0c1f;
+/// Indentation per tree level in the explorer.
+const TREE_INDENT: f32 = 14.0;
 const TAB_BAR_HEIGHT: f32 = 36.0;
 const HUD_HEIGHT: f32 = 46.0;
 /// Placeholder until the first layout measures the real terminal area.
@@ -49,6 +55,10 @@ pub struct WorkspaceView {
     config_messages: Vec<String>,
     /// Last failure to start a session, cleared by the next success.
     launch_error: Option<String>,
+    /// Project whose launchers are shown and whose workspace the explorer shows.
+    selected_project: usize,
+    files: FileTree,
+    show_files: bool,
 }
 
 impl WorkspaceView {
@@ -72,7 +82,11 @@ impl WorkspaceView {
             tabs: Tabs::default(),
             config_messages: settings.messages,
             launch_error: None,
+            selected_project: initial_project,
+            files: FileTree::default(),
+            show_files: true,
         };
+        this.select_project(initial_project);
         this.launch(initial_project, SHELL_LAUNCHER, window, cx);
         this
     }
@@ -168,15 +182,40 @@ impl WorkspaceView {
     }
 
     /// Gives keyboard focus to the active terminal and updates the title.
-    fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.active() else {
             window.set_window_title("castorterm");
             return;
         };
         let handle = tab.handle.view.read(cx).focus_handle(cx);
         window.focus(&handle);
-        let project = &self.tree.projects[tab.project].name;
-        window.set_window_title(&format!("{} · {project} — castorterm", tab.label));
+        let project = tab.project;
+        let name = &self.tree.projects[project].name;
+        window.set_window_title(&format!("{} · {name} — castorterm", tab.label));
+        self.select_project(project);
+    }
+
+    /// Selects a project and expands its root in the explorer.
+    fn select_project(&mut self, project: usize) {
+        let Some(node) = self.tree.projects.get(project) else {
+            return;
+        };
+        self.selected_project = project;
+        if !self.files.is_expanded(&node.path) {
+            self.files.expand(&node.path);
+        }
+    }
+
+    /// Types the path of `file` into the active session (not executed).
+    fn insert_path(&mut self, file: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.active() else {
+            return;
+        };
+        let project = &self.tree.projects[tab.project].path;
+        if let Some(text) = path_for_terminal(file, project, cfg!(windows)) {
+            tab.handle.view.read(cx).type_text(&format!("{text} "));
+        }
+        self.focus_active(window, cx);
     }
 
     /// App shortcuts run in the capture phase, before the terminal sees the key.
@@ -217,6 +256,10 @@ impl WorkspaceView {
             Shortcut::PrevSession => {
                 self.tabs.prev();
                 self.focus_active(window, cx);
+                cx.notify();
+            }
+            Shortcut::ToggleFiles => {
+                self.show_files = !self.show_files;
                 cx.notify();
             }
         }
@@ -300,18 +343,21 @@ impl WorkspaceView {
         let workspaces = self.tree.workspaces.iter().map(|workspace| {
             let projects = workspace.projects.iter().map(|&project| {
                 let node = &self.tree.projects[project];
-                let launchers = self.launchers.iter().enumerate().map(|(index, launcher)| {
-                    launcher_button(
-                        (SharedString::from(format!("launch-{project}")), index),
-                        format!("+ {}", launcher.name),
-                        launcher_color(index),
-                    )
-                    .on_click(cx.listener(
-                        move |this, _: &ClickEvent, window, cx| {
-                            this.launch(project, index, window, cx)
-                        },
-                    ))
-                });
+                let selected = project == self.selected_project;
+                let launchers = self.launchers.iter().enumerate().filter(|_| selected).map(
+                    |(index, launcher)| {
+                        launcher_button(
+                            (SharedString::from(format!("launch-{project}")), index),
+                            format!("+ {}", launcher.name),
+                            launcher_color(index),
+                        )
+                        .on_click(cx.listener(
+                            move |this, _: &ClickEvent, window, cx| {
+                                this.launch(project, index, window, cx)
+                            },
+                        ))
+                    },
+                );
                 let sessions = self
                     .tabs
                     .iter()
@@ -325,6 +371,7 @@ impl WorkspaceView {
                             .flex()
                             .items_center()
                             .gap_2()
+                            .ml_4()
                             .px_2()
                             .py(px(5.0))
                             .rounded_md()
@@ -350,23 +397,48 @@ impl WorkspaceView {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .pb_3()
+                    .pb_2()
                     .child(
                         div()
-                            .px_2()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(TEXT))
-                            .child(SharedString::from(node.name.clone())),
-                    )
-                    .child(
-                        div()
+                            .id(("project", project))
                             .flex()
-                            .flex_wrap()
-                            .gap_1()
+                            .items_center()
+                            .gap_2()
                             .px_2()
-                            .pb_1()
-                            .children(launchers),
+                            .py(px(4.0))
+                            .rounded_md()
+                            .cursor_pointer()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(if selected { TEXT } else { MUTED }))
+                            .when(selected, |d| d.bg(rgba(with_alpha(TEXT, 0x0f))))
+                            .when(!selected, |d| {
+                                d.hover(|s| s.bg(rgba(with_alpha(TEXT, 0x0a))))
+                            })
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .w(px(10.0))
+                                    .text_color(rgb(WORKSPACE))
+                                    .child(if selected { "›" } else { "" }),
+                            )
+                            .child(SharedString::from(node.name.clone()))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.select_project(project);
+                                cx.notify();
+                            })),
                     )
+                    .when(selected, |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_1()
+                                .pl_5()
+                                .pr_1()
+                                .pb_1()
+                                .children(launchers),
+                        )
+                    })
                     .children(sessions)
             });
             div()
@@ -413,6 +485,129 @@ impl WorkspaceView {
             )
             .children(messages)
             .children(workspaces)
+    }
+
+    fn render_explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let workspace = self
+            .tree
+            .workspaces
+            .iter()
+            .find(|w| w.projects.contains(&self.selected_project));
+        let mut rows = Vec::new();
+        if let Some(workspace) = workspace {
+            for &project in &workspace.projects {
+                let node = &self.tree.projects[project];
+                let root = node.path.clone();
+                let expanded = self.files.is_expanded(&root);
+                let is_selected = project == self.selected_project;
+                rows.push(
+                    tree_row(rows.len(), 0, chevron(expanded))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(if is_selected { TEXT } else { MUTED }))
+                        .child(SharedString::from(node.name.clone()))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.files.toggle(&root);
+                            cx.notify();
+                        })),
+                );
+                for row in self.files.rows(&node.path) {
+                    let index = rows.len();
+                    rows.push(match row {
+                        Row::Entry {
+                            depth,
+                            entry,
+                            expanded,
+                        } => {
+                            let path = entry.path.clone();
+                            let base = tree_row(
+                                index,
+                                depth + 1,
+                                if entry.is_dir { chevron(expanded) } else { "" },
+                            );
+                            if entry.is_dir {
+                                base.text_color(rgb(TEXT))
+                                    .child(SharedString::from(entry.name))
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        this.files.toggle(&path);
+                                        cx.notify();
+                                    }))
+                            } else {
+                                base.text_color(rgb(file_color(&entry.name)))
+                                    .child(SharedString::from(entry.name))
+                                    .on_click(cx.listener(
+                                        move |this, _: &ClickEvent, window, cx| {
+                                            this.insert_path(&path, window, cx)
+                                        },
+                                    ))
+                            }
+                        }
+                        Row::Error { depth, message } => tree_row(index, depth + 1, "")
+                            .text_color(rgb(ERROR))
+                            .child(SharedString::from(format!("Cannot read: {message}"))),
+                        Row::More { depth, count } => tree_row(index, depth + 1, "")
+                            .text_color(rgb(MUTED))
+                            .child(SharedString::from(format!("… {count} more"))),
+                    });
+                }
+            }
+        }
+
+        let header = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_3()
+            .py_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(SMALL_TEXT_SIZE))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(div().text_color(rgb(MUTED)).child("FILES"))
+                    .children(workspace.map(|w| {
+                        div()
+                            .text_color(rgb(WORKSPACE))
+                            .child(SharedString::from(label(&w.name)))
+                    })),
+            )
+            .child(
+                div()
+                    .id("refresh-files")
+                    .px_2()
+                    .rounded_md()
+                    .text_size(px(SMALL_TEXT_SIZE))
+                    .text_color(rgb(MUTED))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgba(with_alpha(ACCENT, 0x22))).text_color(rgb(ACCENT)))
+                    .child("Refresh")
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.files.refresh();
+                        cx.notify();
+                    })),
+            );
+
+        div()
+            .flex_none()
+            .w(px(EXPLORER_WIDTH))
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(EXPLORER_BG))
+            .border_r_1()
+            .border_color(rgb(BORDER))
+            .child(header)
+            .child(
+                div()
+                    .id("explorer-list")
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .pb_2()
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
     }
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -498,6 +693,34 @@ impl WorkspaceView {
             .text_size(px(TEXT_SIZE))
             .children(tabs)
     }
+}
+
+/// Folder state marker in the explorer.
+fn chevron(expanded: bool) -> &'static str {
+    if expanded { "▾" } else { "▸" }
+}
+
+/// One explorer line, indented by `depth`, with a fixed-width marker column.
+fn tree_row(index: usize, depth: usize, marker: &'static str) -> Stateful<Div> {
+    div()
+        .id(("tree-row", index))
+        .flex()
+        .items_center()
+        .gap_1()
+        .h(px(22.0))
+        .pl(px(8.0 + depth as f32 * TREE_INDENT))
+        .pr_2()
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .cursor_pointer()
+        .hover(|s| s.bg(rgba(with_alpha(TEXT, 0x0d))))
+        .child(
+            div()
+                .flex_none()
+                .w(px(12.0))
+                .text_color(rgb(MUTED))
+                .child(marker),
+        )
 }
 
 /// Soft coloured glow around an element.
@@ -624,6 +847,7 @@ impl Render for WorkspaceView {
                     .flex()
                     .flex_row()
                     .child(self.render_sidebar(cx))
+                    .when(self.show_files, |d| d.child(self.render_explorer(cx)))
                     .child(
                         div()
                             .flex_1()
