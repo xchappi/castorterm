@@ -13,6 +13,7 @@ mod keys;
 mod name_input;
 mod palette;
 mod provider;
+mod restore;
 mod session;
 mod shell;
 mod shortcuts;
