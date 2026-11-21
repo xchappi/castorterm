@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent_status;
+mod attention;
 mod board;
 mod commands;
 mod config;

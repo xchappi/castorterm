@@ -7,6 +7,7 @@ use gpui::{
 };
 
 use super::{EditTarget, MiddleTab, WorkspaceView};
+use crate::agent_status::AgentStatus;
 use crate::commands::{self, Action, Entry};
 use crate::keys::Mods;
 use crate::name_input::{InputAction, NameInput};
@@ -56,10 +57,17 @@ impl WorkspaceView {
     /// project, then every other project, then the rest.
     fn palette_entries(&self) -> Vec<Entry> {
         let mut entries = Vec::new();
-        for tab in self.tabs.iter() {
+        // Agents waiting for the user first.
+        let mut tabs: Vec<_> = self.tabs.iter().collect();
+        tabs.sort_by_key(|t| self.statuses.get(&t.id) != Some(&AgentStatus::Waiting));
+        for tab in tabs {
+            let project = &self.tree.projects[tab.project].name;
             entries.push(Entry {
                 title: format!("Go to {}", tab.label),
-                detail: self.tree.projects[tab.project].name.clone(),
+                detail: match self.statuses.get(&tab.id) {
+                    Some(status) => format!("{project} · {}", status.as_str()),
+                    None => project.clone(),
+                },
                 action: Action::Activate(tab.id),
             });
         }
