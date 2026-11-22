@@ -25,6 +25,9 @@ pub struct SavedSession {
     pub project: PathBuf,
     /// Launcher name ("Shell", "Claude Code"...).
     pub launcher: String,
+    /// Name the user gave the session, if any (validated on restore).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -128,7 +131,10 @@ pub fn resume_command(command: &str, resume_args: Option<&[String]>) -> String {
     }
 }
 
-/// What to reopen: `(project, launcher)` for every saved session whose
+/// A session to reopen: project index, launcher index and its saved name.
+pub type PlannedSession = (usize, usize, Option<String>);
+
+/// What to reopen: `(project, launcher, name)` for every saved session whose
 /// project is still listed in a workspace and whose launcher still exists,
 /// in order, at most [`MAX_SESSIONS`]; plus the position of the active one
 /// in that list. A folder listed in two workspaces maps to the first one.
@@ -136,7 +142,7 @@ pub fn plan(
     state: &SavedState,
     tree: &ProjectTree,
     launchers: &[Launcher],
-) -> (Vec<(usize, usize)>, Option<usize>) {
+) -> (Vec<PlannedSession>, Option<usize>) {
     let listed: Vec<usize> = tree
         .workspaces
         .iter()
@@ -157,7 +163,7 @@ pub fn plan(
             if state.active == Some(index) {
                 active = Some(sessions.len());
             }
-            sessions.push((project, launcher));
+            sessions.push((project, launcher, saved.label.clone()));
         }
     }
     (sessions, active)
@@ -243,6 +249,7 @@ mod tests {
         SavedSession {
             project: project.to_path_buf(),
             launcher: launcher.into(),
+            label: None,
         }
     }
 
@@ -261,7 +268,7 @@ mod tests {
             window: None,
         };
         let (sessions, active) = plan(&state, &tree, &launchers);
-        assert_eq!(sessions, vec![(0, 0), (1, 1)]);
+        assert_eq!(sessions, vec![(0, 0, None), (1, 1, None)]);
         assert_eq!(active, Some(1));
     }
 
@@ -279,7 +286,7 @@ mod tests {
         };
         let (sessions, active) = plan(&state, &tree, &launchers);
         assert_eq!(sessions.len(), MAX_SESSIONS);
-        assert!(sessions.iter().all(|&(p, _)| p == 1));
+        assert!(sessions.iter().all(|(p, _, _)| *p == 1));
         assert_eq!(active, None);
     }
 

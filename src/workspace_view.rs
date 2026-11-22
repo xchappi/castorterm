@@ -405,6 +405,10 @@ impl WorkspaceView {
         }
         self.statuses.remove(&id);
         self.cwds.remove(&id);
+        if self.renaming_session(id) {
+            self.editor = None;
+            self.sync_input_gate();
+        }
         self.save_state();
         if self.tabs.is_empty() {
             cx.quit();
@@ -447,12 +451,17 @@ impl WorkspaceView {
         // One entry per planned session, `None` when it could not start, so
         // `active` (a position in the plan) still points at the right one.
         let mut opened = Vec::new();
-        for (project, launcher) in sessions {
+        for (project, launcher, label) in sessions {
             // Typed text comes from the config only, never from the file.
             let typed = self.launchers[launcher].command.as_deref().map(|command| {
                 restore::resume_command(command, self.launchers[launcher].resume_args.as_deref())
             });
-            opened.push(self.launch_with(project, launcher, typed, window, cx));
+            let id = self.launch_with(project, launcher, typed, window, cx);
+            // The name is only shown; `rename` rejects anything unusable.
+            if let (Some(id), Some(label)) = (id, label) {
+                self.tabs.rename(id, &label);
+            }
+            opened.push(id);
         }
         if let Some(id) = active.and_then(|i| opened.get(i).copied().flatten()) {
             self.tabs.activate(id);
@@ -590,6 +599,32 @@ impl WorkspaceView {
         crate::tree::cwd_label(&self.tree.projects[tab.project].path, cwd)
     }
 
+    /// Click on a session's tab or sidebar row: activate it; a double click
+    /// also renames it.
+    fn on_session_click(
+        &mut self,
+        id: SessionId,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate(id, window, cx);
+        if event.click_count() >= 2 {
+            self.open_editor(EditTarget::RenameSession(id), window, cx);
+        }
+    }
+
+    /// A tab dropped on another: it takes that tab's place.
+    fn drop_tab(&mut self, dragged: SessionId, target: SessionId, cx: &mut Context<Self>) {
+        let Some(index) = self.tabs.iter().position(|t| t.id == target) else {
+            return;
+        };
+        if self.tabs.move_to(dragged, index) {
+            self.save_state();
+            cx.notify();
+        }
+    }
+
     /// Sessions whose agent is waiting for the user.
     fn waiting_count(&self) -> usize {
         self.statuses
@@ -625,6 +660,7 @@ impl WorkspaceView {
             state.sessions.push(SavedSession {
                 project: self.tree.projects[tab.project].path.clone(),
                 launcher: tab.handle.launcher.clone(),
+                label: tab.renamed.then(|| tab.label.clone()),
             });
         }
         if self.saved_state.as_ref() == Some(&state) {
@@ -993,6 +1029,19 @@ impl WorkspaceView {
             Shortcut::ZoomIn => self.change_zoom(Some(crate::theme::ZOOM_STEP), cx),
             Shortcut::ZoomOut => self.change_zoom(Some(-crate::theme::ZOOM_STEP), cx),
             Shortcut::ZoomReset => self.change_zoom(None, cx),
+            Shortcut::MoveSessionLeft | Shortcut::MoveSessionRight => {
+                let delta = if shortcut == Shortcut::MoveSessionLeft {
+                    -1
+                } else {
+                    1
+                };
+                if let Some(id) = self.tabs.active_id()
+                    && self.tabs.move_by(id, delta)
+                {
+                    self.save_state();
+                    cx.notify();
+                }
+            }
         }
     }
 
@@ -1144,8 +1193,8 @@ impl WorkspaceView {
                                     }))
                                     .children(self.statuses.get(&id).map(|s| status_badge(*s)))
                                     .on_click(cx.listener(
-                                        move |this, _: &ClickEvent, window, cx| {
-                                            this.activate(id, window, cx)
+                                        move |this, event: &ClickEvent, window, cx| {
+                                            this.on_session_click(id, event, window, cx)
                                         },
                                     ))
                             });
@@ -1956,11 +2005,15 @@ impl WorkspaceView {
                     d.hover(|s| s.bg(rgba(with_alpha(TEXT, 0x0d))))
                 })
                 .child(dot(color, 7.0, is_active))
-                .child(
+                .child(if self.renaming_session(id) {
+                    self.render_editor()
+                        .unwrap_or_else(|| div().into_any_element())
+                } else {
                     div()
                         .text_color(rgb(if is_active { TEXT } else { MUTED }))
-                        .child(SharedString::from(tab.label.clone())),
-                )
+                        .child(SharedString::from(tab.label.clone()))
+                        .into_any_element()
+                })
                 .children(self.statuses.get(&id).map(|s| status_badge(*s)))
                 .child(div().text_color(rgb(MUTED)).child(SharedString::from(
                     match self.session_cwd_label(tab) {
@@ -1984,8 +2037,27 @@ impl WorkspaceView {
                             this.close(id, window, cx);
                         })),
                 )
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    this.activate(id, window, cx)
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    this.on_session_click(id, event, window, cx)
+                }))
+                // Drag a tab onto another to take its place.
+                .on_drag(
+                    DraggedTab {
+                        id,
+                        label: tab.label.clone().into(),
+                        color,
+                    },
+                    |dragged, _, _, cx| cx.new(|_| dragged.clone()),
+                )
+                .drag_over::<DraggedTab>(move |style, dragged, _, _| {
+                    if dragged.id == id {
+                        style
+                    } else {
+                        style.bg(rgba(with_alpha(color, 0x33)))
+                    }
+                })
+                .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                    this.drop_tab(dragged.id, id, cx)
                 }))
         });
 
@@ -2319,5 +2391,27 @@ mod tests {
         assert_eq!(plural(1, "session", "sessions"), "session");
         assert_eq!(plural(0, "session", "sessions"), "sessions");
         assert_eq!(plural(3, "session", "sessions"), "sessions");
+    }
+}
+
+/// A tab being dragged; also its drag preview.
+#[derive(Clone)]
+struct DraggedTab {
+    id: SessionId,
+    label: SharedString,
+    color: u32,
+}
+
+impl Render for DraggedTab {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(self.color))
+            .bg(theme_bg())
+            .text_color(rgb(TEXT))
+            .child(self.label.clone())
     }
 }

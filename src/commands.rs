@@ -13,6 +13,8 @@ pub enum Action {
     /// Add folders to a workspace (folder picker).
     AddFolder(usize),
     NewWorkspace,
+    /// Rename an open session.
+    RenameSession(crate::tabs::SessionId),
     ShowFiles,
     ShowQuests,
 }

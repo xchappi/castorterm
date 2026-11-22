@@ -22,6 +22,8 @@ use crate::tree::project_node;
 pub(super) enum EditTarget {
     NewWorkspace,
     Rename(usize),
+    /// Name of an open session (tab).
+    RenameSession(crate::tabs::SessionId),
 }
 
 /// The inline name field, while it is open.
@@ -40,9 +42,14 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let text = match target {
-            EditTarget::NewWorkspace => "",
-            EditTarget::Rename(w) => self.tree.workspaces[w].name.as_str(),
+            EditTarget::NewWorkspace => String::new(),
+            EditTarget::Rename(w) => self.tree.workspaces[w].name.clone(),
+            EditTarget::RenameSession(id) => match self.tabs.iter().find(|t| t.id == id) {
+                Some(tab) => tab.label.clone(),
+                None => return,
+            },
         };
+        let text = text.as_str();
         self.editor = Some(NameEditor {
             target,
             input: NameInput::new(text),
@@ -103,9 +110,23 @@ impl WorkspaceView {
         let Some(editor) = self.editor.as_mut() else {
             return;
         };
+        if let EditTarget::RenameSession(id) = editor.target {
+            let label = editor.input.text.clone();
+            if !self.tabs.rename(id, &label) && self.tabs.iter().any(|t| t.id == id) {
+                editor.error = Some(format!(
+                    "1-{} visible characters",
+                    crate::tabs::MAX_LABEL_CHARS
+                ));
+                cx.notify();
+                return;
+            }
+            self.close_editor(window, cx);
+            self.save_state();
+            return;
+        }
         let except = match editor.target {
-            EditTarget::NewWorkspace => None,
             EditTarget::Rename(w) => Some(w),
+            _ => None,
         };
         let name = match self.tree.check_workspace_name(&editor.input.text, except) {
             Ok(name) => name,
@@ -123,6 +144,7 @@ impl WorkspaceView {
                 // A new workspace is empty: offer its first folders right away.
                 self.pick_folders(workspace, window, cx);
             }
+            EditTarget::RenameSession(_) => {}
             EditTarget::Rename(workspace) => {
                 let node = &mut self.tree.workspaces[workspace];
                 if node.name == name {
@@ -361,6 +383,28 @@ impl WorkspaceView {
     pub(super) fn render_editor(&self) -> Option<AnyElement> {
         let editor = self.editor.as_ref()?;
         let placeholder = editor.input.text.is_empty();
+        if matches!(editor.target, EditTarget::RenameSession(_)) {
+            // Compact, inside the tab: the border turns red on a bad name.
+            let border = if editor.error.is_some() {
+                ERROR
+            } else {
+                ACCENT
+            };
+            return Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .px_1()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(rgba(with_alpha(border, 0xaa)))
+                    .bg(rgba(with_alpha(ACCENT, 0x10)))
+                    .text_color(rgb(TEXT))
+                    .child(SharedString::from(editor.input.text.clone()))
+                    .child(div().w(px(2.0)).h(px(14.0)).ml(px(1.0)).bg(rgb(ACCENT)))
+                    .into_any_element(),
+            );
+        }
         Some(
             div()
                 .flex()
@@ -398,6 +442,13 @@ impl WorkspaceView {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// Whether the name field is renaming session `id`.
+    pub(super) fn renaming_session(&self, id: crate::tabs::SessionId) -> bool {
+        self.editor
+            .as_ref()
+            .is_some_and(|e| e.target == EditTarget::RenameSession(id))
     }
 
     /// Whether the name field is renaming `workspace`.

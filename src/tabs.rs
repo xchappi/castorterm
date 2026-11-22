@@ -10,6 +10,8 @@ pub struct Tab<T> {
     /// Index of the project in the project tree.
     pub project: usize,
     pub label: String,
+    /// Whether the user named it (saved and restored with the session).
+    pub renamed: bool,
     pub handle: T,
 }
 
@@ -77,6 +79,7 @@ impl<T> Tabs<T> {
             id,
             project,
             label,
+            renamed: false,
             handle,
         });
         self.active = Some(self.tabs.len() - 1);
@@ -123,11 +126,98 @@ impl<T> Tabs<T> {
             self.active = Some((a + len - 1) % len);
         }
     }
+
+    /// Renames a session. The label is trimmed, single-line and at most
+    /// [`MAX_LABEL_CHARS`] characters; returns false if it is not usable.
+    pub fn rename(&mut self, id: SessionId, label: &str) -> bool {
+        let label = label.trim();
+        let ok = !label.is_empty()
+            && label.chars().count() <= MAX_LABEL_CHARS
+            && !label.chars().any(crate::board::is_hidden);
+        match self.tabs.iter_mut().find(|t| t.id == id) {
+            Some(tab) if ok => {
+                tab.label = label.to_string();
+                tab.renamed = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Moves a session to position `index` (clamped); the active session
+    /// stays active.
+    pub fn move_to(&mut self, id: SessionId, index: usize) -> bool {
+        let Some(from) = self.tabs.iter().position(|t| t.id == id) else {
+            return false;
+        };
+        let active_id = self.active_id();
+        let tab = self.tabs.remove(from);
+        let to = index.min(self.tabs.len());
+        self.tabs.insert(to, tab);
+        self.active = active_id.and_then(|a| self.tabs.iter().position(|t| t.id == a));
+        from != to
+    }
+
+    /// Moves a session `delta` places left (negative) or right, clamped.
+    pub fn move_by(&mut self, id: SessionId, delta: isize) -> bool {
+        let Some(from) = self.tabs.iter().position(|t| t.id == id) else {
+            return false;
+        };
+        let to = from.saturating_add_signed(delta).min(self.tabs.len() - 1);
+        self.move_to(id, to)
+    }
 }
+
+/// Longest session name accepted when renaming.
+pub const MAX_LABEL_CHARS: usize = 40;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn abc() -> (Tabs<()>, [SessionId; 3]) {
+        let mut t = Tabs::default();
+        let a = t.open(0, "A", ());
+        let b = t.open(0, "B", ());
+        let c = t.open(0, "C", ());
+        (t, [a, b, c])
+    }
+
+    fn order(t: &Tabs<()>) -> Vec<String> {
+        t.iter().map(|x| x.label.clone()).collect()
+    }
+
+    #[test]
+    fn rename_validates() {
+        let (mut t, [a, ..]) = abc();
+        assert!(t.rename(a, "  Reviewer  "));
+        assert_eq!(order(&t)[0], "Reviewer");
+        assert!(t.iter().next().unwrap().renamed);
+        assert!(!t.iter().nth(1).unwrap().renamed);
+        assert!(!t.rename(a, "   "));
+        assert!(!t.rename(a, "a\nb"));
+        assert!(!t.rename(a, "a\u{202E}b"));
+        assert!(!t.rename(a, &"x".repeat(MAX_LABEL_CHARS + 1)));
+        assert!(!t.rename(999, "x"));
+        assert_eq!(order(&t)[0], "Reviewer");
+    }
+
+    #[test]
+    fn move_keeps_the_active_session() {
+        let (mut t, [a, b, c]) = abc();
+        t.activate(b);
+        assert!(t.move_to(a, 2));
+        assert_eq!(order(&t), ["B", "C", "A"]);
+        assert_eq!(t.active_id(), Some(b));
+        assert!(t.move_by(c, -1));
+        assert_eq!(order(&t), ["C", "B", "A"]);
+        assert_eq!(t.active_id(), Some(b));
+        // Clamped at the ends.
+        assert!(!t.move_by(c, -5));
+        assert!(t.move_to(c, 99));
+        assert_eq!(order(&t), ["B", "A", "C"]);
+        assert!(!t.move_to(999, 0));
+    }
 
     fn three() -> (Tabs<&'static str>, [SessionId; 3]) {
         let mut tabs = Tabs::default();

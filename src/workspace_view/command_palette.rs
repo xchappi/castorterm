@@ -102,6 +102,13 @@ impl WorkspaceView {
                 action: Action::AddFolder(index),
             });
         }
+        if let Some(tab) = self.tabs.active() {
+            entries.push(Entry {
+                title: "Rename session".into(),
+                detail: tab.label.clone(),
+                action: Action::RenameSession(tab.id),
+            });
+        }
         entries.push(Entry {
             title: "New workspace".into(),
             detail: String::new(),
@@ -193,7 +200,7 @@ impl WorkspaceView {
             return;
         };
         // Sessions can end while the palette is open.
-        if let Action::Activate(id) = action
+        if let Action::Activate(id) | Action::RenameSession(id) = action
             && !self.tabs.iter().any(|t| t.id == id)
         {
             self.notice = Some("That session has ended".into());
@@ -215,6 +222,10 @@ impl WorkspaceView {
                 }
             }
             Action::NewWorkspace => self.open_editor(EditTarget::NewWorkspace, window, cx),
+            Action::RenameSession(id) => {
+                self.activate(id, window, cx);
+                self.open_editor(EditTarget::RenameSession(id), window, cx);
+            }
             Action::ShowFiles => {
                 self.show_files = true;
                 self.show_tab(MiddleTab::Files, cx);
