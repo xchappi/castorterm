@@ -305,6 +305,12 @@ pub struct TerminalView {
     preview: Option<Preview>,
     /// Pending preview load or auto-hide (dropping it cancels it).
     preview_task: Option<Task<()>>,
+    /// Files the agent used (from its hooks), most recent first.
+    touched: Vec<crate::touched::Touched>,
+    /// The list of those files is open.
+    show_touched: bool,
+    /// Row of that list under the mouse (its file is previewed).
+    row_hover: Option<PathBuf>,
     _events: Task<()>,
 }
 
@@ -572,6 +578,9 @@ impl TerminalView {
             ctrl: false,
             preview: None,
             preview_task: None,
+            touched: Vec::new(),
+            show_touched: false,
+            row_hover: None,
             _events: events_task,
         }
     }
@@ -997,12 +1006,14 @@ impl TerminalView {
             return;
         }
         self.hover = link.map(|l| (row, l.start, l.end, l.target));
-        // A pasted image stays until it times out; other previews follow
-        // the mouse.
-        if !matches!(
-            self.preview.as_ref().map(|p| &p.content),
-            Some(PreviewContent::Pasted(_))
-        ) {
+        // A pasted image stays until it times out, and a file of the list
+        // while the mouse is on it; other previews follow the mouse.
+        if self.row_hover.is_none()
+            && !matches!(
+                self.preview.as_ref().map(|p| &p.content),
+                Some(PreviewContent::Pasted(_))
+            )
+        {
             self.preview = None;
             self.preview_task = None;
         }
@@ -1198,6 +1209,173 @@ impl TerminalView {
         )
     }
 
+    /// Files the agent used, from its hooks (polled by the window).
+    pub fn set_touched(&mut self, touched: Vec<crate::touched::Touched>, cx: &mut Context<Self>) {
+        if self.touched != touched {
+            self.touched = touched;
+            cx.notify();
+        }
+    }
+
+    /// Previews a file of the list after the mouse rests on its row.
+    fn preview_row(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.row_hover = Some(path.clone());
+        let raw = path.to_string_lossy().into_owned();
+        self.preview_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HOVER_PREVIEW_DELAY).await;
+            let loaded = cx
+                .background_executor()
+                .spawn(async move {
+                    let full = crate::links::locate(&raw, None, None)?;
+                    load_preview(&full, None)
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.row_hover.as_ref() == Some(&path)
+                    && let Some(preview) = loaded
+                {
+                    view.preview = Some(preview);
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    /// `path` as shown in the list: relative to the project when inside it.
+    fn shown_path(&self, path: &std::path::Path) -> String {
+        self.project_dir
+            .as_deref()
+            .and_then(|root| path.strip_prefix(root).ok())
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    }
+
+    /// The "N files" button and, when open, the list of files the agent
+    /// used: bottom left of the terminal.
+    fn render_touched(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        use crate::theme::{
+            ACCENT, BORDER, MUTED, PANEL_BG, SMALL_TEXT_SIZE, TEXT, ui, with_alpha,
+        };
+        use crate::touched::Action;
+        if self.touched.is_empty() {
+            return None;
+        }
+        let rows = self.show_touched.then(|| {
+            self.touched.iter().enumerate().map(|(i, t)| {
+                let (badge, color) = match t.action {
+                    Action::Read => ("R", MUTED),
+                    Action::Edit => ("E", 0xffb547),
+                    Action::Write => ("W", 0x4dff9a),
+                };
+                let path = t.path.clone();
+                let open = t.path.to_string_lossy().into_owned();
+                div()
+                    .id(("touched", i))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py(px(2.0))
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(gpui::rgba(with_alpha(ACCENT, 0x18))))
+                    .child(
+                        div()
+                            .w(px(14.0))
+                            .flex_none()
+                            .text_color(gpui::rgb(color))
+                            .child(badge),
+                    )
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_color(gpui::rgb(TEXT))
+                            .child(SharedString::from(self.shown_path(&t.path))),
+                    )
+                    .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
+                        if *hovered {
+                            view.preview_row(path.clone(), cx);
+                        } else if view.row_hover.as_ref() == Some(&path) {
+                            view.row_hover = None;
+                            view.preview = None;
+                            view.preview_task = None;
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |view, _: &gpui::ClickEvent, _, cx| {
+                        view.open_link(
+                            &crate::links::Target::Path {
+                                path: open.clone(),
+                                line: None,
+                                col: None,
+                            },
+                            cx,
+                        );
+                    }))
+            })
+        });
+        let count = self.touched.len();
+        Some(
+            div()
+                .absolute()
+                .bottom(px(8.0))
+                .left(px(8.0))
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap_1()
+                .text_size(ui(SMALL_TEXT_SIZE))
+                .when_some(rows, |d, rows| {
+                    d.child(
+                        div()
+                            .id("touched-list")
+                            .w(px(360.0))
+                            .max_h(px(260.0))
+                            .overflow_y_scroll()
+                            .flex()
+                            .flex_col()
+                            .p_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(gpui::rgb(BORDER))
+                            .bg(gpui::rgb(PANEL_BG))
+                            .shadow_lg()
+                            .occlude()
+                            .children(rows),
+                    )
+                })
+                .child(
+                    div()
+                        .id("touched-chip")
+                        .px_2()
+                        .py(px(2.0))
+                        .rounded_md()
+                        .border_1()
+                        .border_color(gpui::rgba(with_alpha(ACCENT, 0x88)))
+                        .bg(gpui::rgb(PANEL_BG))
+                        .text_color(gpui::rgb(if self.show_touched { TEXT } else { MUTED }))
+                        .cursor_pointer()
+                        .occlude()
+                        .child(SharedString::from(format!(
+                            "{count} {}",
+                            if count == 1 { "file" } else { "files" }
+                        )))
+                        .on_click(cx.listener(|view, _: &gpui::ClickEvent, _, cx| {
+                            view.show_touched = !view.show_touched;
+                            if !view.show_touched {
+                                view.row_hover = None;
+                            }
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// Marks the session as an agent's, whose menus can be clicked.
     pub fn set_agent(&mut self, agent: bool) {
         self.agent = agent;
@@ -1358,6 +1536,7 @@ impl Render for TerminalView {
             .filter(|_| self.ctrl)
             .map(|h| (h.0, h.1, h.2));
         let preview = self.render_preview(cx);
+        let touched = self.render_touched(cx);
         // Follow the match as output scrolls it; drop it if it is gone.
         let highlight = self.search.as_mut().and_then(|search| {
             search.relocate(&session.term().lock());
@@ -1422,6 +1601,7 @@ impl Render for TerminalView {
                 )
                 .size_full(),
             )
+            .children(touched)
             .children(preview)
     }
 }

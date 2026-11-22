@@ -350,6 +350,7 @@ impl WorkspaceView {
         if let Some(file) = &status_file {
             // A recycled process id could match an old file.
             let _ = std::fs::remove_file(file);
+            let _ = std::fs::remove_file(crate::touched::files_for(file));
         }
         let env = status_file
             .iter()
@@ -439,6 +440,7 @@ impl WorkspaceView {
         session.view.read(cx).shutdown();
         if let Some(file) = &session.status_file {
             let _ = std::fs::remove_file(file);
+            let _ = std::fs::remove_file(crate::touched::files_for(file));
         }
         self.statuses.remove(&id);
         self.cwds.remove(&id);
@@ -538,19 +540,25 @@ impl WorkspaceView {
                 .background_spawn(async move {
                     files
                         .into_iter()
-                        .map(|(id, f)| (id, agent_status::read(&f)))
+                        .map(|(id, f)| {
+                            let touched = crate::touched::read(&crate::touched::files_for(&f));
+                            (id, agent_status::read(&f), touched)
+                        })
                         .collect::<Vec<_>>()
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.statuses_loading = false;
                 let mut statuses = HashMap::new();
-                for (id, read) in reads {
+                for (id, read, touched) in reads {
                     // Closed meanwhile: drop. Unreadable for a moment: keep
                     // the last status, so it neither flickers nor re-alerts.
-                    if !this.tabs.iter().any(|t| t.id == id) {
+                    let Some(tab) = this.tabs.iter().find(|t| t.id == id) else {
                         continue;
-                    }
+                    };
+                    tab.handle
+                        .view
+                        .update(cx, |view, cx| view.set_touched(touched, cx));
                     if let Some(status) = read.or_else(|| this.statuses.get(&id).copied()) {
                         statuses.insert(id, status);
                     }
@@ -2411,6 +2419,7 @@ impl Drop for WorkspaceView {
         for tab in self.tabs.iter() {
             if let Some(file) = &tab.handle.status_file {
                 let _ = std::fs::remove_file(file);
+                let _ = std::fs::remove_file(crate::touched::files_for(file));
             }
         }
     }

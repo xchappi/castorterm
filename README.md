@@ -56,6 +56,20 @@ Build your workspaces from the window, no config editing needed:
 
 Every change is saved to your config file, keeping your comments.
 
+Agents report the files they read and edit through the same hooks as their
+status: a "N files" button bottom left of the session lists them (W written,
+E edited, R read), with the same preview on hover and opening on click. For
+Claude Code, add to the `PostToolUse` hooks of `~/.claude/settings.json`:
+
+```json
+{ "matcher": "Read|Edit|Write|MultiEdit|NotebookEdit",
+  "hooks": [{ "type": "command", "command": "\"C:/path/to/castorterm.exe\" --touched" }] }
+```
+
+`castorterm --touched` reads the hook's JSON from stdin and does nothing
+outside castorterm. Install a castorterm that knows `--touched` before adding
+the hook: older versions would open a window for it.
+
 Paths and URLs in the output are links. Rest the mouse on a file path
 (`src/view.rs:120`, `out/screenshot.png`) to preview it over the terminal: an
 excerpt around that line, or the image. Ctrl+click opens it: URLs in the
