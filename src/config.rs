@@ -62,6 +62,8 @@ struct RawUi {
     restore_sessions: Option<bool>,
     /// Text size factor for the terminal and the interface.
     zoom: Option<f32>,
+    /// Editor for Ctrl+click on file paths (VS Code-like: `-g path:line`).
+    editor: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -158,6 +160,8 @@ pub struct Settings {
     pub workspaces: Vec<Workspace>,
     /// CRT-style scanlines over the terminal (on by default).
     pub scanlines: bool,
+    /// Editor program for Ctrl+click on paths (`code` when not set).
+    pub editor: Option<String>,
     /// Reopen the sessions of the last run at startup (on by default).
     pub restore_sessions: bool,
     /// Text size factor (`crate::theme::clamp_zoom`), 1.0 by default.
@@ -178,6 +182,7 @@ impl Default for Settings {
             agents: Vec::new(),
             workspaces: Vec::new(),
             scanlines: true,
+            editor: None,
             restore_sessions: true,
             zoom: 1.0,
             messages: Vec::new(),
@@ -277,6 +282,11 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
         scanlines: raw.ui.scanlines.unwrap_or(true),
         restore_sessions: raw.ui.restore_sessions.unwrap_or(true),
         zoom: crate::theme::clamp_zoom(raw.ui.zoom.unwrap_or(1.0)),
+        editor: raw
+            .ui
+            .editor
+            .map(|e| e.trim().to_string())
+            .filter(|e| !e.is_empty()),
         ..Settings::default()
     };
 
@@ -735,6 +745,19 @@ mod tests {
                 .workspaces[0]
                 .collapsed
         );
+    }
+
+    #[test]
+    fn editor_setting() {
+        assert_eq!(parse("", None).unwrap().editor, None);
+        assert_eq!(
+            parse("[ui]\neditor = \" cursor \"", None)
+                .unwrap()
+                .editor
+                .as_deref(),
+            Some("cursor")
+        );
+        assert_eq!(parse("[ui]\neditor = \"\"", None).unwrap().editor, None);
     }
 
     #[test]

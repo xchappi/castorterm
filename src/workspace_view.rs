@@ -146,6 +146,8 @@ pub struct WorkspaceView {
     wheel_acc: f32,
     /// Pending save of the zoom (replaced, so only the last one runs).
     zoom_save: Option<gpui::Task<()>>,
+    /// Editor for Ctrl+click on paths in the terminals, resolved once.
+    editor_program: Option<PathBuf>,
     /// Window width at the last frame, to size the side columns.
     viewport_width: f32,
     /// Worktrees being created, so a double click starts only one.
@@ -250,6 +252,11 @@ impl WorkspaceView {
             wheel_acc: 0.0,
             viewport_width: f32::INFINITY,
             zoom_save: None,
+            editor_program: crate::provider::resolve(
+                settings.editor.as_deref().unwrap_or("code"),
+                std::env::var_os("PATH").as_deref(),
+                cfg!(windows),
+            ),
             pending_worktrees: Default::default(),
             status_dir: None,
             next_status_key: 0,
@@ -364,9 +371,12 @@ impl WorkspaceView {
         let gate = self.input_gate.clone();
         // Sessions that run a command (agents) get clickable menus.
         let agent = launcher.command.is_some();
+        let project_dir = node.path.clone();
+        let editor = self.editor_program.clone();
         let view = cx.new(|cx| {
             let mut view = TerminalView::new(session, events_rx, style, gate, cx);
             view.set_agent(agent);
+            view.set_links(project_dir, editor);
             view
         });
         let subscription = cx.subscribe_in(&view, window, Self::on_terminal_event);

@@ -12,6 +12,8 @@ family = "Cascadia Mono"
 size = 14
 
 [ui]
+# Editor for Ctrl+click on file paths (VS Code-like, opened with -g path:line).
+# editor = "code"
 # CRT-style scanlines over the terminal.
 scanlines = true
 # Reopen the sessions of the last run at startup (sessions.json next to
