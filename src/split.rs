@@ -8,13 +8,14 @@ use crate::tabs::SessionId;
 /// Sessions shown side by side: `(left, right)`.
 pub type Pair = (SessionId, SessionId);
 
-/// Session to show next to `active` when splitting: the one before it in
-/// tab order, or the one after it if it is first. `None` with one session.
-pub fn partner(order: &[SessionId], active: SessionId) -> Option<SessionId> {
+/// The pair shown when splitting at `active`: it and the session before it
+/// in tab order (or after it, if it is first), left to right in tab order.
+/// `None` with one session.
+pub fn split_at(order: &[SessionId], active: SessionId) -> Option<Pair> {
     let index = order.iter().position(|&id| id == active)?;
     match index {
-        0 => order.get(1).copied(),
-        i => Some(order[i - 1]),
+        0 => order.get(1).map(|&next| (active, next)),
+        i => Some((order[i - 1], active)),
     }
 }
 
@@ -32,7 +33,7 @@ pub fn follow(
 ) -> Option<Pair> {
     let (left, right) = pair?;
     let active = active?;
-    if !exists(left) || !exists(right) || left == right {
+    if !exists(active) || !exists(left) || !exists(right) || left == right {
         return None;
     }
     if active == left || active == right {
@@ -51,11 +52,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn partner_is_the_previous_tab() {
-        assert_eq!(partner(&[1, 2, 3], 3), Some(2));
-        assert_eq!(partner(&[1, 2, 3], 1), Some(2));
-        assert_eq!(partner(&[1], 1), None);
-        assert_eq!(partner(&[1, 2], 9), None);
+    fn split_follows_tab_order() {
+        assert_eq!(split_at(&[1, 2, 3], 3), Some((2, 3)));
+        assert_eq!(split_at(&[1, 2, 3], 1), Some((1, 2)));
+        assert_eq!(split_at(&[1], 1), None);
+        assert_eq!(split_at(&[], 1), None);
+        assert_eq!(split_at(&[1, 2], 9), None);
     }
 
     #[test]
@@ -72,5 +74,8 @@ mod tests {
         assert_eq!(follow(Some((1, 2)), Some(1), Some(1), |id| id != 2), None);
         assert_eq!(follow(None, Some(1), Some(2), all), None);
         assert_eq!(follow(Some((1, 1)), Some(1), Some(1), all), None);
+        assert_eq!(follow(Some((1, 2)), None, Some(2), all), Some((1, 2)));
+        assert_eq!(follow(Some((1, 2)), Some(3), Some(3), all), None);
+        assert_eq!(follow(Some((1, 2)), Some(1), Some(2), |id| id != 2), None);
     }
 }

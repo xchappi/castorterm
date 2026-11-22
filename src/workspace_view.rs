@@ -483,7 +483,9 @@ impl WorkspaceView {
             opened.push(id);
         }
         if let Some(id) = active.and_then(|i| opened.get(i).copied().flatten()) {
+            let prev = self.tabs.active_id();
             self.tabs.activate(id);
+            self.follow_split(prev);
             self.select_active_project(cx);
             self.focus_active(window, cx);
         }
@@ -727,10 +729,16 @@ impl WorkspaceView {
             return;
         };
         let (active, project) = (active.id, active.project);
+        // Two terminals need room: at least ~40 columns each.
+        if self.viewport_width < MIN_SPLIT_WIDTH * crate::theme::zoom() {
+            self.notice = Some("Window too narrow to split".into());
+            cx.notify();
+            return;
+        }
         let order: Vec<SessionId> = self.tabs.iter().map(|t| t.id).collect();
-        match crate::split::partner(&order, active) {
-            Some(other) => {
-                self.split = Some((other, active));
+        match crate::split::split_at(&order, active) {
+            Some(pair) => {
+                self.split = Some(pair);
                 cx.notify();
             }
             None => {
@@ -763,7 +771,6 @@ impl WorkspaceView {
             .border_color(rgba(with_alpha(color, if active { 0x88 } else { 0x33 })))
             .bg(theme_bg())
             .when(active, |d| d.shadow(glow(color, 0x33, 18.0)))
-            .when(!active, |d| d.opacity(0.85))
             // A click in a pane makes it the active session.
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -2507,6 +2514,9 @@ mod tests {
         assert_eq!(plural(3, "session", "sessions"), "sessions");
     }
 }
+
+/// Narrowest window (at 100 % zoom) that is split in two terminals.
+const MIN_SPLIT_WIDTH: f32 = 1100.0;
 
 /// A tab being dragged; also its drag preview.
 #[derive(Clone)]

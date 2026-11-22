@@ -40,7 +40,9 @@ impl Shortcut {
 }
 
 /// Maps a GPUI key name plus modifiers to a shortcut. Chosen to avoid keys
-/// that shells and TUIs use: Ctrl+Shift+T/W/E/O/P/J and Ctrl+(Shift+)Tab.
+/// that shells and TUIs use: Ctrl+Shift+T/W/E/O/P/J/D, Ctrl+Shift+PageUp/Down
+/// and Ctrl+(Shift+)Tab. (Ctrl+Shift+D reaches a terminal as Ctrl+D, which
+/// still works without Shift.)
 pub fn match_shortcut(key: &str, mods: Mods) -> Option<Shortcut> {
     if !mods.ctrl || mods.alt {
         return None;
