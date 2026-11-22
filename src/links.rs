@@ -198,14 +198,20 @@ pub fn resolve(raw: &str, base: Option<&Path>) -> Option<PathBuf> {
     plain.then_some(full)
 }
 
-/// Whether `path` can be touched without reaching the network: on a local
-/// drive and with no link (symlink, junction, mount point) on the way,
-/// checked from the root down so nothing behind a link is ever accessed.
+/// Whether `path` can be touched without reaching the network: on Windows,
+/// on a local drive and with no link (symlink, junction, mount point) on
+/// the way, checked from the root down so nothing behind a link is ever
+/// accessed; elsewhere, that it exists.
 /// False for missing paths too. Touches the file system: call it off the UI
 /// thread.
 pub fn is_local(path: &Path) -> bool {
     if !path.is_absolute() || !local_drive(path) {
         return false;
+    }
+    // Following links is only a risk on Windows (network paths make it
+    // authenticate); elsewhere `/tmp` and `/var` are links themselves.
+    if !cfg!(windows) {
+        return path.try_exists().unwrap_or(false);
     }
     let mut prefix = PathBuf::new();
     for component in path.components() {
