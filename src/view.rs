@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use alacritty_terminal::grid::{Dimensions as _, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point as GridPoint, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::search::{Match, RegexSearch};
@@ -13,9 +14,10 @@ use alacritty_terminal::vte::ansi::CursorShape;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{
-    App, Bounds, Context, ElementInputHandler, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, Hsla, KeyDownEvent, PaintQuad, Pixels, Point, Rgba, ShapedLine, SharedString, Task,
-    TextRun, UTF16Selection, Window, canvas, div, fill, font, point, prelude::*, px, size,
+    App, Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PaintQuad, Pixels, Point, Rgba, ShapedLine, SharedString, Task, TextRun,
+    UTF16Selection, Window, canvas, div, fill, font, point, prelude::*, px, size,
 };
 
 use crate::keys::{KeyMode, Mods, encode_key};
@@ -33,6 +35,14 @@ const FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT: f32 = 1.3;
 /// Pixels of wheel movement per scrolled line.
 const WHEEL_LINE_PX: f32 = 18.0;
+/// Most wheel events reported to a program for one wheel event.
+const MAX_WHEEL_EVENTS: u32 = 10;
+/// Background of selected text.
+const SELECTION: Rgb8 = Rgb8 {
+    r: 0x3a,
+    g: 0x4f,
+    b: 0x7a,
+};
 /// Most lines scrolled by one wheel event.
 const MAX_WHEEL_LINES: f32 = 1000.0;
 /// Background of the search match.
@@ -99,7 +109,45 @@ pub struct TerminalView {
     search: Option<Search>,
     /// Wheel movement not yet turned into whole lines.
     wheel_lines: f32,
+    /// Grid geometry of the last frame, to map the mouse to cells.
+    metrics: Rc<Cell<Option<GridMetrics>>>,
+    /// Button whose press was reported to the program (its release is too).
+    reported: Option<crate::mouse::Button>,
+    /// Cell of the last reported motion (motion is sent once per cell).
+    last_motion: Option<(usize, usize)>,
+    /// A selection is being dragged with the left button.
+    selecting: bool,
+    /// The session runs an agent: its menus may be clicked.
+    agent: bool,
+    /// Menu option pressed; chosen on release in the same cell.
+    pending_menu: Option<(usize, usize)>,
     _events: Task<()>,
+}
+
+/// Where the grid was painted.
+#[derive(Clone, Copy, Debug)]
+struct GridMetrics {
+    origin: Point<Pixels>,
+    cell_width: Pixels,
+    line_height: Pixels,
+    cols: usize,
+    rows: usize,
+}
+
+impl GridMetrics {
+    /// Cell under `position` (clamped to the grid) and which half of it.
+    fn cell(&self, position: Point<Pixels>) -> (usize, usize, Side) {
+        let x = f32::from(position.x - self.origin.x) / f32::from(self.cell_width);
+        let y = f32::from(position.y - self.origin.y) / f32::from(self.line_height);
+        let col = (x.max(0.0) as usize).min(self.cols.saturating_sub(1));
+        let row = (y.max(0.0) as usize).min(self.rows.saturating_sub(1));
+        let side = if x.fract() < 0.5 {
+            Side::Left
+        } else {
+            Side::Right
+        };
+        (col, row, side)
+    }
 }
 
 /// A scrollback search: the compiled query and the match shown.
@@ -193,6 +241,59 @@ pub fn next_match<T>(
     term.search_next(regex, origin, direction, side, None)
 }
 
+/// What the program asked for, from the terminal modes.
+fn reporting(mode: TermMode) -> crate::mouse::Reporting {
+    crate::mouse::Reporting {
+        clicks: mode.contains(TermMode::MOUSE_REPORT_CLICK),
+        drag: mode.contains(TermMode::MOUSE_DRAG),
+        motion: mode.contains(TermMode::MOUSE_MOTION),
+        sgr: mode.contains(TermMode::SGR_MOUSE),
+    }
+}
+
+fn mouse_button(button: MouseButton) -> Option<crate::mouse::Button> {
+    match button {
+        MouseButton::Left => Some(crate::mouse::Button::Left),
+        MouseButton::Middle => Some(crate::mouse::Button::Middle),
+        MouseButton::Right => Some(crate::mouse::Button::Right),
+        _ => None,
+    }
+}
+
+fn mouse_mods(m: gpui::Modifiers) -> crate::mouse::MouseMods {
+    crate::mouse::MouseMods {
+        shift: m.shift,
+        alt: m.alt,
+        ctrl: m.control,
+    }
+}
+
+/// Grid point of visible cell `col`, `row` when scrolled `display_offset`
+/// lines into the history.
+fn grid_point(display_offset: usize, col: usize, row: usize) -> GridPoint {
+    GridPoint::new(Line(row as i32 - display_offset as i32), Column(col))
+}
+
+/// Bytes for pasting `text`: line breaks as Enter (`\r`), and wrapped in
+/// bracketed-paste markers when the program asked for them (any marker in
+/// the text itself is removed so it cannot end the paste early).
+pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    // No escape or control characters from the clipboard: an ESC could
+    // end a bracketed paste early (markers can be split to survive a simple
+    // replace) or drive the program. Line breaks become Enter, tabs stay.
+    let text: String = text
+        .replace("\r\n", "\r")
+        .replace('\n', "\r")
+        .chars()
+        .filter(|&c| c == '\r' || c == '\t' || !c.is_control())
+        .collect();
+    if bracketed {
+        format!("\x1b[200~{text}\x1b[201~").into_bytes()
+    } else {
+        text.into_bytes()
+    }
+}
+
 /// Longest query searched.
 pub const MAX_QUERY_CHARS: usize = 200;
 
@@ -265,6 +366,12 @@ impl TerminalView {
             gate,
             search: None,
             wheel_lines: 0.0,
+            metrics: Rc::new(Cell::new(None)),
+            reported: None,
+            last_motion: None,
+            selecting: false,
+            agent: false,
+            pending_menu: None,
             _events: events_task,
         }
     }
@@ -359,12 +466,327 @@ impl TerminalView {
         let pixels = f32::from(event.delta.pixel_delta(px(WHEEL_LINE_PX)).y);
         let (whole, rest) = wheel_lines(self.wheel_lines, pixels);
         self.wheel_lines = rest;
+        if whole == 0 || self.gate.paused() {
+            return;
+        }
+        let (reporting, mode) = {
+            let term = self.session.term().lock();
+            (reporting(*term.mode()), *term.mode())
+        };
+        // Programs that read the mouse get wheel events (Shift scrolls here).
+        let steps = whole.unsigned_abs().min(MAX_WHEEL_EVENTS);
+        if reporting.active() && !event.modifiers.shift {
+            if let Some(metrics) = self.metrics.get() {
+                let (col, row, _) = metrics.cell(event.position);
+                let button = if whole > 0 {
+                    crate::mouse::Button::WheelUp
+                } else {
+                    crate::mouse::Button::WheelDown
+                };
+                let mods = mouse_mods(event.modifiers);
+                if let Some(bytes) = crate::mouse::encode(
+                    button,
+                    crate::mouse::Kind::Press,
+                    col,
+                    row,
+                    mods,
+                    reporting.sgr,
+                ) {
+                    self.session.write(bytes.repeat(steps as usize));
+                }
+            }
+            return;
+        }
+        // Full-screen programs without mouse support (less, man) scroll
+        // with the arrow keys, like in other terminals.
+        if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
+            let arrow: &[u8] = match (whole > 0, mode.contains(TermMode::APP_CURSOR)) {
+                (true, true) => b"\x1bOA",
+                (true, false) => b"\x1b[A",
+                (false, true) => b"\x1bOB",
+                (false, false) => b"\x1b[B",
+            };
+            self.session.write(arrow.repeat(steps as usize));
+            return;
+        }
         self.scroll_lines(whole, cx);
     }
 
-    /// Back to the live screen when the user types.
+    /// Mouse press: reported to programs that read the mouse; otherwise the
+    /// left button selects (double click: word, triple: line) and the right
+    /// one copies the selection or pastes.
+    fn on_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.gate.paused() {
+            return;
+        }
+        // The click that brings a pane forward (split view) is only that.
+        let focused = self.focus_handle.is_focused(window);
+        let Some(metrics) = self.metrics.get() else {
+            return;
+        };
+        let Some(button) = mouse_button(event.button) else {
+            return;
+        };
+        let (col, row, side) = metrics.cell(event.position);
+        let reporting = reporting(*self.session.term().lock().mode());
+        if reporting.active() && !event.modifiers.shift {
+            if !focused {
+                return;
+            }
+            let mods = mouse_mods(event.modifiers);
+            if let Some(bytes) = crate::mouse::encode(
+                button,
+                crate::mouse::Kind::Press,
+                col,
+                row,
+                mods,
+                reporting.sgr,
+            ) {
+                self.session.write(bytes);
+                self.reported = Some(button);
+                self.last_motion = Some((col, row));
+            }
+            return;
+        }
+        // Menus of programs that do not read the mouse (Claude Code's
+        // prompts): a click moves to the option, a click on the chosen one
+        // confirms it.
+        if button == crate::mouse::Button::Left
+            && event.click_count == 1
+            && focused
+            && self.menu_action(row).is_some()
+        {
+            self.pending_menu = Some((col, row));
+            return;
+        }
+        match button {
+            crate::mouse::Button::Left => {
+                let ty = match event.click_count {
+                    0 | 1 => SelectionType::Simple,
+                    2 => SelectionType::Semantic,
+                    _ => SelectionType::Lines,
+                };
+                let mut term = self.session.term().lock();
+                let point = grid_point(term.grid().display_offset(), col, row);
+                term.selection = Some(Selection::new(ty, point, side));
+                self.selecting = true;
+                cx.notify();
+            }
+            crate::mouse::Button::Right if !self.copy_selection(cx) => self.paste(cx),
+            _ => {}
+        }
+    }
+
+    fn on_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(metrics) = self.metrics.get() else {
+            return;
+        };
+        let (col, row, side) = metrics.cell(event.position);
+        // A press reported to the program whose release happened outside the
+        // view: report it now, so the program does not think it is held.
+        if event.pressed_button.is_none()
+            && let Some(button) = self.reported.take()
+        {
+            self.report_release(button, col, row, event.modifiers);
+        }
+        if self.selecting {
+            if event.pressed_button != Some(MouseButton::Left) || self.gate.paused() {
+                self.selecting = false;
+                return;
+            }
+            let mut term = self.session.term().lock();
+            let point = grid_point(term.grid().display_offset(), col, row);
+            if let Some(selection) = term.selection.as_mut() {
+                selection.update(point, side);
+            }
+            cx.notify();
+            return;
+        }
+        if self.gate.paused() || self.last_motion == Some((col, row)) {
+            return;
+        }
+        let reporting = reporting(*self.session.term().lock().mode());
+        let button = event
+            .pressed_button
+            .and_then(mouse_button)
+            .unwrap_or(crate::mouse::Button::None);
+        if reporting.wants(crate::mouse::Kind::Motion, button) && !event.modifiers.shift {
+            let mods = mouse_mods(event.modifiers);
+            if let Some(bytes) = crate::mouse::encode(
+                button,
+                crate::mouse::Kind::Motion,
+                col,
+                row,
+                mods,
+                reporting.sgr,
+            ) {
+                self.session.write(bytes);
+                self.last_motion = Some((col, row));
+            }
+        }
+    }
+
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.last_motion = None;
+        if let Some((col, row)) = self.pending_menu.take() {
+            // Chosen only if released where it was pressed (no drag).
+            let here = self.metrics.get().map(|m| m.cell(event.position));
+            if event.button == MouseButton::Left
+                && here.is_some_and(|(c, r, _)| (c, r) == (col, row))
+                && let Some((action, app_cursor)) = self.menu_action(row)
+            {
+                self.send_menu(action, app_cursor);
+            }
+            return;
+        }
+        if self.selecting {
+            if event.button != MouseButton::Left {
+                return;
+            }
+            self.selecting = false;
+            // A plain click leaves no selection behind.
+            let mut term = self.session.term().lock();
+            if term.selection.as_ref().is_some_and(Selection::is_empty) {
+                term.selection = None;
+                cx.notify();
+            }
+            return;
+        }
+        let Some(button) = self.reported.take() else {
+            return;
+        };
+        let Some(metrics) = self.metrics.get() else {
+            return;
+        };
+        let (col, row, _) = metrics.cell(event.position);
+        self.report_release(button, col, row, event.modifiers);
+    }
+
+    /// The menu click `row` would make (see `mouse::menu_click`), with
+    /// whether the program uses application cursor keys; `None` when clicks
+    /// are not menu choices here (see `mouse::menu_clicks_allowed`).
+    fn menu_action(&self, row: usize) -> Option<(crate::mouse::MenuClick, bool)> {
+        let term = self.session.term().lock();
+        let mode = *term.mode();
+        let allowed = crate::mouse::menu_clicks_allowed(
+            self.agent,
+            term.grid().display_offset() == 0,
+            mode.contains(TermMode::ALT_SCREEN),
+            mode.contains(TermMode::SHOW_CURSOR),
+            true,
+        );
+        if !allowed {
+            return None;
+        }
+        let screen: Vec<String> = (0..term.screen_lines())
+            .map(|r| {
+                let line = &term.grid()[Line(r as i32)];
+                (0..term.columns()).map(|c| line[Column(c)].c).collect()
+            })
+            .collect();
+        let action = crate::mouse::menu_click(&screen, row)?;
+        Some((action, mode.contains(TermMode::APP_CURSOR)))
+    }
+
+    /// Sends the keys for a menu click: arrows to move, Enter to choose.
+    fn send_menu(&self, action: crate::mouse::MenuClick, app_cursor: bool) {
+        let bytes: Vec<u8> = match action {
+            crate::mouse::MenuClick::Choose => b"\r".to_vec(),
+            crate::mouse::MenuClick::Move(delta) => {
+                let arrow: &[u8] = match (delta > 0, app_cursor) {
+                    (true, true) => b"\x1bOB",
+                    (true, false) => b"\x1b[B",
+                    (false, true) => b"\x1bOA",
+                    (false, false) => b"\x1b[A",
+                };
+                arrow.repeat(delta.unsigned_abs() as usize)
+            }
+        };
+        self.session.write(bytes);
+    }
+
+    /// Reports the release of `button` if the program still reads the mouse.
+    fn report_release(
+        &self,
+        button: crate::mouse::Button,
+        col: usize,
+        row: usize,
+        modifiers: gpui::Modifiers,
+    ) {
+        let reporting = reporting(*self.session.term().lock().mode());
+        if reporting.active()
+            && let Some(bytes) = crate::mouse::encode(
+                button,
+                crate::mouse::Kind::Release,
+                col,
+                row,
+                mouse_mods(modifiers),
+                reporting.sgr,
+            )
+        {
+            self.session.write(bytes);
+        }
+    }
+
+    /// Marks the session as an agent's, whose menus can be clicked.
+    pub fn set_agent(&mut self, agent: bool) {
+        self.agent = agent;
+    }
+
+    /// Copies the selection to the clipboard and clears it; false if there
+    /// was nothing selected.
+    fn copy_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        let text = {
+            let mut term = self.session.term().lock();
+            let text = term.selection_to_string().filter(|t| !t.is_empty());
+            if text.is_some() {
+                term.selection = None;
+            }
+            text
+        };
+        match text {
+            Some(text) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                cx.notify();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Pastes the clipboard text into the session (bracketed if the program
+    /// asked for it, so a pasted command is not run line by line).
+    fn paste(&mut self, cx: &mut Context<Self>) {
+        if self.gate.paused() {
+            return;
+        }
+        let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) else {
+            return;
+        };
+        let bracketed = self
+            .session
+            .term()
+            .lock()
+            .mode()
+            .contains(TermMode::BRACKETED_PASTE);
+        self.follow_output();
+        self.session.write(paste_bytes(&text, bracketed));
+    }
+
+    /// Back to the live screen when the user types; the selection goes.
     fn follow_output(&self) {
         let mut term = self.session.term().lock();
+        term.selection = None;
         if term.grid().display_offset() != 0 {
             term.scroll_display(Scroll::Bottom);
         }
@@ -405,6 +827,26 @@ impl TerminalView {
                 return;
             }
         }
+        // Copy and paste: Ctrl+Shift+C / Ctrl+Shift+V. Ctrl+C always
+        // interrupts (an agent must stop even with text selected).
+        let key = keystroke.key.to_ascii_lowercase();
+        if mods.ctrl && !mods.alt {
+            let copied = match (key.as_str(), mods.shift) {
+                ("c", true) => {
+                    self.copy_selection(cx);
+                    true
+                }
+                ("v", true) => {
+                    self.paste(cx);
+                    true
+                }
+                _ => false,
+            };
+            if copied {
+                cx.stop_propagation();
+                return;
+            }
+        }
         let mode = KeyMode {
             app_cursor: self.session.app_cursor(),
             alt_sends_escape: cfg!(not(target_os = "macos")),
@@ -431,6 +873,7 @@ impl Render for TerminalView {
         let scanlines = style.scanlines;
         let focus_handle = self.focus_handle.clone();
         let entity = cx.entity();
+        let metrics = self.metrics.clone();
         // Follow the match as output scrolls it; drop it if it is gone.
         let highlight = self.search.as_mut().and_then(|search| {
             search.relocate(&session.term().lock());
@@ -443,10 +886,24 @@ impl Render for TerminalView {
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
+            .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
             .child(
                 canvas(
                     move |bounds, window, _cx| {
-                        layout_frame(&session, &style, highlight.as_ref(), bounds, window)
+                        layout_frame(
+                            &session,
+                            &style,
+                            highlight.as_ref(),
+                            &metrics,
+                            bounds,
+                            window,
+                        )
                     },
                     move |bounds, frame, window, cx| {
                         paint_frame(bounds, frame, window, cx);
@@ -477,6 +934,7 @@ fn layout_frame(
     session: &Session,
     style: &TerminalStyle,
     highlight: Option<&Match>,
+    metrics: &Cell<Option<GridMetrics>>,
     bounds: Bounds<Pixels>,
     window: &mut Window,
 ) -> Frame {
@@ -494,6 +952,13 @@ fn layout_frame(
 
     let cols = ((bounds.size.width / cell_width).floor() as usize).max(2);
     let rows = ((bounds.size.height / line_height).floor() as usize).max(1);
+    metrics.set(Some(GridMetrics {
+        origin: bounds.origin,
+        cell_width,
+        line_height,
+        cols,
+        rows,
+    }));
     session.resize(
         GridSize { cols, rows },
         (cell_width / px(1.0)) as u16,
@@ -519,6 +984,7 @@ fn layout_frame(
         let colors = content.colors;
         let offset = content.display_offset as i32;
         let cursor = content.cursor;
+        let selection = content.selection;
 
         for indexed in content.display_iter {
             let line = indexed.point.line.0 + offset;
@@ -537,6 +1003,9 @@ fn layout_frame(
             }
             if flags.contains(Flags::DIM) {
                 fg = fg.dim();
+            }
+            if selection.is_some_and(|s| s.contains(indexed.point)) {
+                bg = SELECTION;
             }
             if highlight.is_some_and(|m| m.contains(&indexed.point)) {
                 (fg, bg) = (theme.background, SEARCH_MATCH);
@@ -843,6 +1312,41 @@ mod tests {
         assert_eq!(moved.start().line.0, m.start().line.0 - 2);
         // Another text there (wrong history size): dropped, no panic.
         assert_eq!(relocate(&term, &m, &text, history + 2), None);
+    }
+
+    #[test]
+    fn paste_encoding() {
+        assert_eq!(paste_bytes("a\r\nb\nc", false), b"a\rb\rc");
+        assert_eq!(paste_bytes("ls", true), b"\x1b[200~ls\x1b[201~");
+        assert_eq!(
+            paste_bytes("x\x1b[201~rm -rf", true),
+            b"\x1b[200~x[201~rm -rf\x1b[201~"
+        );
+        // A marker split to survive one replace cannot reappear.
+        let nested = paste_bytes("\x1b[20\x1b[201~1~rm -rf ~", true);
+        let text = String::from_utf8(nested).unwrap();
+        assert_eq!(text.matches('\x1b').count(), 2);
+        assert!(text.ends_with("\x1b[201~"));
+        // Other control characters are dropped, tabs kept.
+        assert_eq!(paste_bytes("a\tb\x07\x03c", false), b"a\tbc");
+    }
+
+    #[test]
+    fn mouse_cells_are_clamped() {
+        let m = GridMetrics {
+            origin: point(px(10.0), px(20.0)),
+            cell_width: px(8.0),
+            line_height: px(16.0),
+            cols: 80,
+            rows: 24,
+        };
+        assert_eq!(m.cell(point(px(10.0), px(20.0))), (0, 0, Side::Left));
+        assert_eq!(m.cell(point(px(25.0), px(37.0))), (1, 1, Side::Right));
+        assert_eq!(m.cell(point(px(0.0), px(0.0))), (0, 0, Side::Left));
+        assert_eq!(m.cell(point(px(9999.0), px(9999.0))).0, 79);
+        assert_eq!(m.cell(point(px(9999.0), px(9999.0))).1, 23);
+        assert_eq!(grid_point(0, 3, 2), GridPoint::new(Line(2), Column(3)));
+        assert_eq!(grid_point(5, 3, 2), GridPoint::new(Line(-3), Column(3)));
     }
 
     #[test]

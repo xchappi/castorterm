@@ -362,7 +362,13 @@ impl WorkspaceView {
 
         let style = self.style.clone();
         let gate = self.input_gate.clone();
-        let view = cx.new(|cx| TerminalView::new(session, events_rx, style, gate, cx));
+        // Sessions that run a command (agents) get clickable menus.
+        let agent = launcher.command.is_some();
+        let view = cx.new(|cx| {
+            let mut view = TerminalView::new(session, events_rx, style, gate, cx);
+            view.set_agent(agent);
+            view
+        });
         let subscription = cx.subscribe_in(&view, window, Self::on_terminal_event);
         self.drop_session_editor_unless(None);
         self.close_search_quietly(cx);
