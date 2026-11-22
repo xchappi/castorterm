@@ -26,6 +26,7 @@ mod shortcuts;
 mod split;
 mod tabs;
 mod theme;
+mod touched;
 mod tree;
 mod view;
 mod workspace_view;
@@ -51,6 +52,13 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == "--status") {
         let result = match args.get(1) {
+            // `--status touched`, run by Claude Code's PostToolUse hook: note
+            // the file the agent used, from the hook's JSON on stdin. A
+            // castorterm without it rejects the value (no window opens).
+            Some(value) if value == "touched" => touched::record_from_hook(
+                std::io::stdin().lock(),
+                std::env::var_os(agent_status::ENV_VAR).as_deref(),
+            ),
             Some(value) => agent_status::write_from_env(
                 value,
                 std::env::var_os(agent_status::ENV_VAR).as_deref(),

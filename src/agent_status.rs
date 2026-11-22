@@ -113,7 +113,7 @@ pub fn write_from_env(value: &str, env_value: Option<&std::ffi::OsStr>) -> Resul
 }
 
 /// An absolute path `.../status/<pid>-<key>.status`, as made by [`file_for`].
-fn is_status_file(path: &Path) -> bool {
+pub(crate) fn is_status_file(path: &Path) -> bool {
     let in_status_dir = path
         .parent()
         .and_then(Path::file_name)
@@ -140,7 +140,10 @@ pub fn remove_stale(dir: &Path) {
     let now = SystemTime::now();
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().is_none_or(|e| e != EXTENSION) {
+        if path
+            .extension()
+            .is_none_or(|e| e != EXTENSION && e != "files")
+        {
             continue;
         }
         let old = entry
