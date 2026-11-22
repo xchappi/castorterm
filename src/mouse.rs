@@ -102,7 +102,7 @@ pub fn encode(
     if kind == Kind::Release {
         code = (code & !0b11) | 3;
     }
-    let byte = |n: usize| u8::try_from(n + 33).ok().filter(|b| *b < 0xff);
+    let byte = |n: usize| u8::try_from(n + 33).ok();
     Some(vec![
         0x1b,
         b'[',
@@ -121,6 +121,21 @@ pub enum MenuClick {
     Move(i32),
     /// The highlighted option was clicked: choose it.
     Choose,
+}
+
+/// Whether a click may be read as a menu choice: only in sessions that
+/// run an agent, on the live screen (not scrolled back, not a full-screen
+/// program), with the cursor hidden as menus have it and shells never do,
+/// and in the pane that already had the keyboard (a click that brings a
+/// pane forward only does that).
+pub fn menu_clicks_allowed(
+    agent: bool,
+    live: bool,
+    alt_screen: bool,
+    cursor_shown: bool,
+    focused: bool,
+) -> bool {
+    agent && live && !alt_screen && !cursor_shown && focused
 }
 
 /// Marker of the highlighted option.
@@ -157,6 +172,17 @@ pub fn menu_click(screen: &[String], row: usize) -> Option<MenuClick> {
         last += 1;
     }
     if last == first || row < first || row > last {
+        return None;
+    }
+    // A text box between rules (Claude Code's input, where lines continue
+    // under the `❯`) is not a menu: a click must never submit it.
+    let is_rule = |r: Option<usize>| {
+        r.and_then(|r| chars.get(r)).is_some_and(|line| {
+            let mut drawn = line.iter().filter(|c| !c.is_whitespace()).peekable();
+            drawn.peek().is_some() && drawn.all(|c| matches!(c, '\u{2500}' | '\u{2501}' | '-'))
+        })
+    };
+    if is_rule(first.checked_sub(1)) || is_rule(Some(last + 1)) {
         return None;
     }
     Some(match row as i32 - marker_row as i32 {
@@ -211,10 +237,28 @@ mod tests {
             Some(b"\x1b[M#\"#".to_vec())
         );
         // One byte per coordinate: too far is not sent.
-        assert!(encode(Button::Left, Kind::Press, 221, 0, NO_MODS, false).is_some());
+        assert!(encode(Button::Left, Kind::Press, 222, 0, NO_MODS, false).is_some());
         assert_eq!(
-            encode(Button::Left, Kind::Press, 222, 0, NO_MODS, false),
+            encode(Button::Left, Kind::Press, 223, 0, NO_MODS, false),
             None
+        );
+        // Motion with the middle button, release keeps the modifiers.
+        assert_eq!(
+            encode(Button::Middle, Kind::Motion, 0, 0, NO_MODS, false),
+            Some(b"\x1b[MA!!".to_vec())
+        );
+        let shift = MouseMods {
+            shift: true,
+            ..NO_MODS
+        };
+        assert_eq!(
+            encode(Button::Left, Kind::Release, 0, 0, shift, false),
+            Some(b"\x1b[M'!!".to_vec())
+        );
+        assert_eq!(
+            String::from_utf8(encode(Button::WheelDown, Kind::Press, 0, 0, shift, true).unwrap())
+                .unwrap(),
+            "\x1b[<69;1;1M"
         );
     }
 
@@ -240,6 +284,26 @@ mod tests {
         assert_eq!(menu_click(&s, 0), Some(MenuClick::Move(-1)));
         assert_eq!(menu_click(&s, 2), Some(MenuClick::Move(1)));
         assert_eq!(menu_click(&s, 3), None);
+    }
+
+    #[test]
+    fn menu_gate() {
+        assert!(menu_clicks_allowed(true, true, false, false, true));
+        assert!(!menu_clicks_allowed(false, true, false, false, true));
+        assert!(!menu_clicks_allowed(true, false, false, false, true));
+        assert!(!menu_clicks_allowed(true, true, true, false, true));
+        assert!(!menu_clicks_allowed(true, true, false, true, true));
+        assert!(!menu_clicks_allowed(true, true, false, false, false));
+    }
+
+    #[test]
+    fn input_boxes_are_not_menus() {
+        // Claude Code's prompt box with a second line: between rules.
+        let s = screen(
+            "\u{2500}\u{2500}\u{2500}\u{2500}\n\u{276F} fix the bug\n  in view.rs\n\u{2500}\u{2500}\u{2500}\u{2500}",
+        );
+        assert_eq!(menu_click(&s, 1), None);
+        assert_eq!(menu_click(&s, 2), None);
     }
 
     #[test]

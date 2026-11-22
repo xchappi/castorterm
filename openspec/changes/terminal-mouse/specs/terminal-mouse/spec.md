@@ -16,17 +16,18 @@ otherwise. Holding Shift SHALL select text instead.
 
 ### Requirement: Select, copy and paste
 Without mouse reporting, dragging with the left button SHALL select text (double click: word,
-triple click: line). Ctrl+Shift+C, Ctrl+C while text is selected, and a right click on a selection
-SHALL copy it; a right click without selection and Ctrl+Shift+V SHALL paste, bracketed when the
+triple click: line). Ctrl+Shift+C and a right click on a selection SHALL copy it, and Ctrl+C SHALL
+always reach the program; a right click without selection and Ctrl+Shift+V SHALL paste, bracketed when the
 program asked for bracketed paste.
 
 #### Scenario: Copy an error
-- **WHEN** the user drags over an error message and presses Ctrl+C
-- **THEN** the text is in the clipboard and the shell does not receive Ctrl+C
+- **WHEN** the user drags over an error message and presses Ctrl+Shift+C
+- **THEN** the text is in the clipboard
 
 ### Requirement: Clickable menus
-For programs that do not read the mouse, a left click on an option of a menu (two or more options
-aligned under a `❯` marker, cursor hidden, live screen) SHALL move the marker to that option with
+In agent sessions whose program does not read the mouse, a left click released on an option of a
+menu (two or more options aligned under a `❯` marker and not between rules, cursor hidden, live
+screen, no full-screen program, pane already focused) SHALL move the marker to that option with
 arrow keys, and a click on the marked option SHALL choose it with Enter.
 
 #### Scenario: Trust a folder

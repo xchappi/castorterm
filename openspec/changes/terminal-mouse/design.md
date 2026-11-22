@@ -14,3 +14,7 @@
   option sends Enter, so a single stray click never confirms anything.
 - **Paste safety.** Bracketed paste strips any end marker inside the text, so pasted text cannot
   break out of the paste and run.
+- **Hardened after review.** Menu clicks only in agent sessions, never in the alternate screen,
+  never on the click that focuses a pane, and only on release in the pressed cell; text boxes
+  between rules (Claude Code's input) are never menus. Pasted text loses every control character
+  but Enter and Tab, so no split marker can end a bracketed paste. Ctrl+C always interrupts.

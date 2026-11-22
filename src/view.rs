@@ -117,6 +117,10 @@ pub struct TerminalView {
     last_motion: Option<(usize, usize)>,
     /// A selection is being dragged with the left button.
     selecting: bool,
+    /// The session runs an agent: its menus may be clicked.
+    agent: bool,
+    /// Menu option pressed; chosen on release in the same cell.
+    pending_menu: Option<(usize, usize)>,
     _events: Task<()>,
 }
 
@@ -274,10 +278,17 @@ fn grid_point(display_offset: usize, col: usize, row: usize) -> GridPoint {
 /// bracketed-paste markers when the program asked for them (any marker in
 /// the text itself is removed so it cannot end the paste early).
 pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
-    let text = text.replace("\r\n", "\r").replace('\n', "\r");
+    // No escape or control characters from the clipboard: an ESC could
+    // end a bracketed paste early (markers can be split to survive a simple
+    // replace) or drive the program. Line breaks become Enter, tabs stay.
+    let text: String = text
+        .replace("\r\n", "\r")
+        .replace('\n', "\r")
+        .chars()
+        .filter(|&c| c == '\r' || c == '\t' || !c.is_control())
+        .collect();
     if bracketed {
-        let clean = text.replace("\x1b[201~", "").replace("\x1b[200~", "");
-        format!("\x1b[200~{clean}\x1b[201~").into_bytes()
+        format!("\x1b[200~{text}\x1b[201~").into_bytes()
     } else {
         text.into_bytes()
     }
@@ -359,6 +370,8 @@ impl TerminalView {
             reported: None,
             last_motion: None,
             selecting: false,
+            agent: false,
+            pending_menu: None,
             _events: events_task,
         }
     }
@@ -505,12 +518,14 @@ impl TerminalView {
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.gate.paused() {
             return;
         }
+        // The click that brings a pane forward (split view) is only that.
+        let focused = self.focus_handle.is_focused(window);
         let Some(metrics) = self.metrics.get() else {
             return;
         };
@@ -520,6 +535,9 @@ impl TerminalView {
         let (col, row, side) = metrics.cell(event.position);
         let reporting = reporting(*self.session.term().lock().mode());
         if reporting.active() && !event.modifiers.shift {
+            if !focused {
+                return;
+            }
             let mods = mouse_mods(event.modifiers);
             if let Some(bytes) = crate::mouse::encode(
                 button,
@@ -538,7 +556,12 @@ impl TerminalView {
         // Menus of programs that do not read the mouse (Claude Code's
         // prompts): a click moves to the option, a click on the chosen one
         // confirms it.
-        if button == crate::mouse::Button::Left && event.click_count == 1 && self.click_menu(row) {
+        if button == crate::mouse::Button::Left
+            && event.click_count == 1
+            && focused
+            && self.menu_action(row).is_some()
+        {
+            self.pending_menu = Some((col, row));
             return;
         }
         match button {
@@ -569,8 +592,15 @@ impl TerminalView {
             return;
         };
         let (col, row, side) = metrics.cell(event.position);
+        // A press reported to the program whose release happened outside the
+        // view: report it now, so the program does not think it is held.
+        if event.pressed_button.is_none()
+            && let Some(button) = self.reported.take()
+        {
+            self.report_release(button, col, row, event.modifiers);
+        }
         if self.selecting {
-            if event.pressed_button != Some(MouseButton::Left) {
+            if event.pressed_button != Some(MouseButton::Left) || self.gate.paused() {
                 self.selecting = false;
                 return;
             }
@@ -607,7 +637,22 @@ impl TerminalView {
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.last_motion = None;
+        if let Some((col, row)) = self.pending_menu.take() {
+            // Chosen only if released where it was pressed (no drag).
+            let here = self.metrics.get().map(|m| m.cell(event.position));
+            if event.button == MouseButton::Left
+                && here.is_some_and(|(c, r, _)| (c, r) == (col, row))
+                && let Some((action, app_cursor)) = self.menu_action(row)
+            {
+                self.send_menu(action, app_cursor);
+            }
+            return;
+        }
         if self.selecting {
+            if event.button != MouseButton::Left {
+                return;
+            }
             self.selecting = false;
             // A plain click leaves no selection behind.
             let mut term = self.session.term().lock();
@@ -624,47 +669,40 @@ impl TerminalView {
             return;
         };
         let (col, row, _) = metrics.cell(event.position);
-        let reporting = reporting(*self.session.term().lock().mode());
-        if reporting.active() {
-            let mods = mouse_mods(event.modifiers);
-            if let Some(bytes) = crate::mouse::encode(
-                button,
-                crate::mouse::Kind::Release,
-                col,
-                row,
-                mods,
-                reporting.sgr,
-            ) {
-                self.session.write(bytes);
-            }
-        }
+        self.report_release(button, col, row, event.modifiers);
     }
 
-    /// Clicks on a menu option (see `mouse::menu_click`) when the program
-    /// hides the cursor, as menus do and shells never do, and the live screen
-    /// is shown. Returns whether the click was used.
-    fn click_menu(&mut self, row: usize) -> bool {
-        let (action, app_cursor) = {
-            let term = self.session.term().lock();
-            let live = term.grid().display_offset() == 0;
-            if !live || term.mode().contains(TermMode::SHOW_CURSOR) {
-                return false;
-            }
-            let screen: Vec<String> = (0..term.screen_lines())
-                .map(|r| {
-                    let line = &term.grid()[Line(r as i32)];
-                    (0..term.columns()).map(|c| line[Column(c)].c).collect()
-                })
-                .collect();
-            (
-                crate::mouse::menu_click(&screen, row),
-                term.mode().contains(TermMode::APP_CURSOR),
-            )
-        };
+    /// The menu click `row` would make (see `mouse::menu_click`), with
+    /// whether the program uses application cursor keys; `None` when clicks
+    /// are not menu choices here (see `mouse::menu_clicks_allowed`).
+    fn menu_action(&self, row: usize) -> Option<(crate::mouse::MenuClick, bool)> {
+        let term = self.session.term().lock();
+        let mode = *term.mode();
+        let allowed = crate::mouse::menu_clicks_allowed(
+            self.agent,
+            term.grid().display_offset() == 0,
+            mode.contains(TermMode::ALT_SCREEN),
+            mode.contains(TermMode::SHOW_CURSOR),
+            true,
+        );
+        if !allowed {
+            return None;
+        }
+        let screen: Vec<String> = (0..term.screen_lines())
+            .map(|r| {
+                let line = &term.grid()[Line(r as i32)];
+                (0..term.columns()).map(|c| line[Column(c)].c).collect()
+            })
+            .collect();
+        let action = crate::mouse::menu_click(&screen, row)?;
+        Some((action, mode.contains(TermMode::APP_CURSOR)))
+    }
+
+    /// Sends the keys for a menu click: arrows to move, Enter to choose.
+    fn send_menu(&self, action: crate::mouse::MenuClick, app_cursor: bool) {
         let bytes: Vec<u8> = match action {
-            None => return false,
-            Some(crate::mouse::MenuClick::Choose) => b"\r".to_vec(),
-            Some(crate::mouse::MenuClick::Move(delta)) => {
+            crate::mouse::MenuClick::Choose => b"\r".to_vec(),
+            crate::mouse::MenuClick::Move(delta) => {
                 let arrow: &[u8] = match (delta > 0, app_cursor) {
                     (true, true) => b"\x1bOB",
                     (true, false) => b"\x1b[B",
@@ -675,7 +713,34 @@ impl TerminalView {
             }
         };
         self.session.write(bytes);
-        true
+    }
+
+    /// Reports the release of `button` if the program still reads the mouse.
+    fn report_release(
+        &self,
+        button: crate::mouse::Button,
+        col: usize,
+        row: usize,
+        modifiers: gpui::Modifiers,
+    ) {
+        let reporting = reporting(*self.session.term().lock().mode());
+        if reporting.active()
+            && let Some(bytes) = crate::mouse::encode(
+                button,
+                crate::mouse::Kind::Release,
+                col,
+                row,
+                mouse_mods(modifiers),
+                reporting.sgr,
+            )
+        {
+            self.session.write(bytes);
+        }
+    }
+
+    /// Marks the session as an agent's, whose menus can be clicked.
+    pub fn set_agent(&mut self, agent: bool) {
+        self.agent = agent;
     }
 
     /// Copies the selection to the clipboard and clears it; false if there
@@ -762,8 +827,8 @@ impl TerminalView {
                 return;
             }
         }
-        // Copy and paste: Ctrl+Shift+C / Ctrl+Shift+V always; Ctrl+C copies
-        // only while something is selected (otherwise it interrupts).
+        // Copy and paste: Ctrl+Shift+C / Ctrl+Shift+V. Ctrl+C always
+        // interrupts (an agent must stop even with text selected).
         let key = keystroke.key.to_ascii_lowercase();
         if mods.ctrl && !mods.alt {
             let copied = match (key.as_str(), mods.shift) {
@@ -771,7 +836,6 @@ impl TerminalView {
                     self.copy_selection(cx);
                     true
                 }
-                ("c", false) => self.copy_selection(cx),
                 ("v", true) => {
                     self.paste(cx);
                     true
@@ -1256,8 +1320,15 @@ mod tests {
         assert_eq!(paste_bytes("ls", true), b"\x1b[200~ls\x1b[201~");
         assert_eq!(
             paste_bytes("x\x1b[201~rm -rf", true),
-            b"\x1b[200~xrm -rf\x1b[201~"
+            b"\x1b[200~x[201~rm -rf\x1b[201~"
         );
+        // A marker split to survive one replace cannot reappear.
+        let nested = paste_bytes("\x1b[20\x1b[201~1~rm -rf ~", true);
+        let text = String::from_utf8(nested).unwrap();
+        assert_eq!(text.matches('\x1b').count(), 2);
+        assert!(text.ends_with("\x1b[201~"));
+        // Other control characters are dropped, tabs kept.
+        assert_eq!(paste_bytes("a\tb\x07\x03c", false), b"a\tbc");
     }
 
     #[test]
