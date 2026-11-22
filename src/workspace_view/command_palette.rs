@@ -114,6 +114,18 @@ impl WorkspaceView {
             detail: String::new(),
             action: Action::NewWorkspace,
         });
+        if !self.tabs.is_empty() {
+            entries.push(Entry {
+                title: if self.split.is_some() {
+                    "Unsplit"
+                } else {
+                    "Split view"
+                }
+                .into(),
+                detail: "Ctrl+Shift+D".into(),
+                action: Action::ToggleSplit,
+            });
+        }
         entries.push(Entry {
             title: "Show files".into(),
             detail: String::new(),
@@ -226,6 +238,7 @@ impl WorkspaceView {
                 self.activate(id, window, cx);
                 self.open_editor(EditTarget::RenameSession(id), window, cx);
             }
+            Action::ToggleSplit => self.toggle_split(window, cx),
             Action::ShowFiles => {
                 self.show_files = true;
                 self.show_tab(MiddleTab::Files, cx);

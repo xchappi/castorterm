@@ -21,6 +21,8 @@ pub enum Shortcut {
     /// Move the active session one place left / right.
     MoveSessionLeft,
     MoveSessionRight,
+    /// Show the active session next to another, or back to one.
+    ToggleSplit,
 }
 
 impl Shortcut {
@@ -38,7 +40,9 @@ impl Shortcut {
 }
 
 /// Maps a GPUI key name plus modifiers to a shortcut. Chosen to avoid keys
-/// that shells and TUIs use: Ctrl+Shift+T/W/E/O/P/J and Ctrl+(Shift+)Tab.
+/// that shells and TUIs use: Ctrl+Shift+T/W/E/O/P/J/D, Ctrl+Shift+PageUp/Down
+/// and Ctrl+(Shift+)Tab. (Ctrl+Shift+D reaches a terminal as Ctrl+D, which
+/// still works without Shift.)
 pub fn match_shortcut(key: &str, mods: Mods) -> Option<Shortcut> {
     if !mods.ctrl || mods.alt {
         return None;
@@ -58,6 +62,7 @@ pub fn match_shortcut(key: &str, mods: Mods) -> Option<Shortcut> {
         ("o", true) => Some(Shortcut::AddFolder),
         ("p", true) => Some(Shortcut::Palette),
         ("j", true) => Some(Shortcut::NextWaiting),
+        ("d", true) => Some(Shortcut::ToggleSplit),
         ("tab", false) => Some(Shortcut::NextSession),
         ("tab", true) => Some(Shortcut::PrevSession),
         ("pageup", true) => Some(Shortcut::MoveSessionLeft),
@@ -97,6 +102,8 @@ mod tests {
         assert_eq!(match_shortcut("p", CTRL_SHIFT), Some(Shortcut::Palette));
         assert_eq!(match_shortcut("p", CTRL), None);
         assert_eq!(match_shortcut("j", CTRL_SHIFT), Some(Shortcut::NextWaiting));
+        assert_eq!(match_shortcut("d", CTRL_SHIFT), Some(Shortcut::ToggleSplit));
+        assert_eq!(match_shortcut("d", CTRL), None);
         assert_eq!(match_shortcut("=", CTRL), Some(Shortcut::ZoomIn));
         assert_eq!(match_shortcut("+", CTRL_SHIFT), Some(Shortcut::ZoomIn));
         assert_eq!(match_shortcut("-", CTRL), Some(Shortcut::ZoomOut));

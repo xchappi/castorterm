@@ -21,6 +21,7 @@ mod restore;
 mod session;
 mod shell;
 mod shortcuts;
+mod split;
 mod tabs;
 mod theme;
 mod tree;
