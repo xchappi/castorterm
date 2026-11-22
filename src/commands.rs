@@ -15,6 +15,8 @@ pub enum Action {
     NewWorkspace,
     /// Rename an open session.
     RenameSession(crate::tabs::SessionId),
+    /// Split the view or go back to one session.
+    ToggleSplit,
     ShowFiles,
     ShowQuests,
 }

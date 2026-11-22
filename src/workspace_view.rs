@@ -157,6 +157,8 @@ pub struct WorkspaceView {
     /// Session whose tab or row got the last click: a double click only
     /// renames when both clicks hit the same session.
     last_click: Option<SessionId>,
+    /// Sessions shown side by side, if split.
+    split: Option<crate::split::Pair>,
     statuses_loading: bool,
     /// An agent started waiting since the last frame: flash the taskbar if
     /// the window is in the background.
@@ -250,6 +252,7 @@ impl WorkspaceView {
             statuses: HashMap::new(),
             cwds: HashMap::new(),
             last_click: None,
+            split: None,
             statuses_loading: false,
             attention_pending: false,
             _status_timer: status_timer,
@@ -358,6 +361,7 @@ impl WorkspaceView {
         let view = cx.new(|cx| TerminalView::new(session, events_rx, style, gate, cx));
         let subscription = cx.subscribe_in(&view, window, Self::on_terminal_event);
         self.drop_session_editor_unless(None);
+        let prev = self.tabs.active_id();
         let id = self.tabs.open(
             project,
             &launcher.name,
@@ -370,6 +374,7 @@ impl WorkspaceView {
             },
         );
         self.launch_error = None;
+        self.follow_split(prev);
         self.save_state();
         self.select_project(project, cx);
         self.focus_active(window, cx);
@@ -404,6 +409,9 @@ impl WorkspaceView {
         let Some(session) = self.tabs.close(id) else {
             return;
         };
+        if self.split.is_some_and(|(l, r)| l == id || r == id) {
+            self.split = None;
+        }
         session.view.read(cx).shutdown();
         if let Some(file) = &session.status_file {
             let _ = std::fs::remove_file(file);
@@ -431,7 +439,9 @@ impl WorkspaceView {
         if self.tabs.iter().any(|t| t.id == id) {
             self.drop_session_editor_unless(Some(id));
         }
+        let prev = self.tabs.active_id();
         if self.tabs.activate(id) {
+            self.follow_split(prev);
             // Show it: unfold its workspace for this run (not saved).
             if let Some(project) = self.tabs.active().map(|t| t.project)
                 && let Some(w) = self.tree.workspace_of(project)
@@ -695,6 +705,75 @@ impl WorkspaceView {
                 self.notice = Some(format!("Could not save the open sessions: {err}"));
             }
         }
+    }
+
+    /// Keeps the split pair in step after the active session changed from
+    /// `prev`.
+    fn follow_split(&mut self, prev: Option<SessionId>) {
+        let ids: Vec<SessionId> = self.tabs.iter().map(|t| t.id).collect();
+        self.split = crate::split::follow(self.split, prev, self.tabs.active_id(), |id| {
+            ids.contains(&id)
+        });
+    }
+
+    /// Splits the view (active session next to the previous one, or a new
+    /// shell in the same project) or goes back to one session.
+    fn toggle_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.split.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let Some(active) = self.tabs.active() else {
+            return;
+        };
+        let (active, project) = (active.id, active.project);
+        let order: Vec<SessionId> = self.tabs.iter().map(|t| t.id).collect();
+        match crate::split::partner(&order, active) {
+            Some(other) => {
+                self.split = Some((other, active));
+                cx.notify();
+            }
+            None => {
+                // One session: the new shell opens on the right, active.
+                if let Some(new) = self.launch_with(project, SHELL_LAUNCHER, None, window, cx) {
+                    self.split = Some((active, new));
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// One terminal in its frame; the active one glows.
+    fn render_pane(
+        &self,
+        tab: &crate::tabs::Tab<OpenSession>,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let color = tab.handle.color;
+        let id = tab.id;
+        div()
+            .id(("pane", id))
+            .flex_1()
+            .min_w(px(0.0))
+            .h_full()
+            .p(px(6.0))
+            .rounded_lg()
+            .border_1()
+            .border_color(rgba(with_alpha(color, if active { 0x88 } else { 0x33 })))
+            .bg(theme_bg())
+            .when(active, |d| d.shadow(glow(color, 0x33, 18.0)))
+            .when(!active, |d| d.opacity(0.85))
+            // A click in a pane makes it the active session.
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    if this.tabs.active_id() != Some(id) {
+                        this.activate(id, window, cx);
+                    }
+                }),
+            )
+            .child(tab.handle.view.clone())
     }
 
     /// Gives keyboard focus to the active terminal and updates the title.
@@ -1017,14 +1096,18 @@ impl WorkspaceView {
                 }
             }
             Shortcut::NextSession => {
+                let prev = self.tabs.active_id();
                 self.tabs.next();
+                self.follow_split(prev);
                 self.select_active_project(cx);
                 self.focus_active(window, cx);
                 self.save_state();
                 cx.notify();
             }
             Shortcut::PrevSession => {
+                let prev = self.tabs.active_id();
                 self.tabs.prev();
+                self.follow_split(prev);
                 self.select_active_project(cx);
                 self.focus_active(window, cx);
                 self.save_state();
@@ -1061,6 +1144,7 @@ impl WorkspaceView {
                     cx.notify();
                 }
             }
+            Shortcut::ToggleSplit => self.toggle_split(window, cx),
         }
     }
 
@@ -2287,22 +2371,26 @@ impl Render for WorkspaceView {
             window.set_window_title(&title);
             self.shown_title = title;
         }
-        let terminal = match self.tabs.active() {
-            Some(tab) => {
-                let color = tab.handle.color;
-                div().size_full().p_2().child(
-                    div()
-                        .size_full()
-                        .p(px(6.0))
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(rgba(with_alpha(color, 0x88)))
-                        .bg(theme_bg())
-                        .shadow(glow(color, 0x33, 18.0))
-                        .child(tab.handle.view.clone()),
-                )
-            }
-            None => div()
+        let active_id = self.tabs.active_id();
+        let pair = self.split.and_then(|(l, r)| {
+            let find = |id| self.tabs.iter().find(|t| t.id == id);
+            Some((find(l)?, find(r)?))
+        });
+        let terminal = match (self.tabs.active(), pair) {
+            (Some(_), Some((left, right))) => div()
+                .size_full()
+                .p_2()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .child(self.render_pane(left, active_id == Some(left.id), cx))
+                .child(self.render_pane(right, active_id == Some(right.id), cx)),
+            (Some(tab), None) => div()
+                .size_full()
+                .p_2()
+                .flex()
+                .child(self.render_pane(tab, true, cx)),
+            (None, _) => div()
                 .size_full()
                 .flex()
                 .flex_col()
