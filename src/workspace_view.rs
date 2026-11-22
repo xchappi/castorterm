@@ -14,6 +14,7 @@ use gpui::{
 
 mod command_palette;
 mod manage;
+mod search_bar;
 mod task_worktree;
 use command_palette::Palette;
 use manage::{EditTarget, NameEditor};
@@ -137,6 +138,8 @@ pub struct WorkspaceView {
     _bounds_subscription: Option<Subscription>,
     /// Command palette, while open.
     palette: Option<Palette>,
+    /// Scrollback search bar over the active terminal.
+    search: Option<search_bar::SearchBar>,
     /// Start agents on tasks in a git worktree of their own.
     task_worktree: bool,
     /// Ctrl + wheel distance not yet turned into a zoom step.
@@ -241,6 +244,7 @@ impl WorkspaceView {
             window_geometry: Some(geometry(window.window_bounds())),
             _bounds_subscription: None,
             palette: None,
+            search: None,
             focus: cx.focus_handle(),
             task_worktree: false,
             wheel_acc: 0.0,
@@ -361,6 +365,7 @@ impl WorkspaceView {
         let view = cx.new(|cx| TerminalView::new(session, events_rx, style, gate, cx));
         let subscription = cx.subscribe_in(&view, window, Self::on_terminal_event);
         self.drop_session_editor_unless(None);
+        self.close_search_quietly(cx);
         let prev = self.tabs.active_id();
         let id = self.tabs.open(
             project,
@@ -405,6 +410,9 @@ impl WorkspaceView {
 
     /// Ends a session and removes its tab; quits when none are left.
     fn close(&mut self, id: SessionId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.as_ref().is_some_and(|s| s.session == id) {
+            self.close_search_quietly(cx);
+        }
         let closed_project = self.tabs.iter().find(|t| t.id == id).map(|t| t.project);
         let Some(session) = self.tabs.close(id) else {
             return;
@@ -438,6 +446,9 @@ impl WorkspaceView {
     fn activate(&mut self, id: SessionId, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.iter().any(|t| t.id == id) {
             self.drop_session_editor_unless(Some(id));
+        }
+        if self.search.as_ref().is_some_and(|s| s.session != id) {
+            self.close_search_quietly(cx);
         }
         let prev = self.tabs.active_id();
         if self.tabs.activate(id) {
@@ -664,7 +675,7 @@ impl WorkspaceView {
     /// palette owns the keyboard.
     pub(crate) fn sync_input_gate(&self) {
         self.input_gate
-            .set_paused(self.editor.is_some() || self.palette.is_some());
+            .set_paused(self.editor.is_some() || self.palette.is_some() || self.search.is_some());
     }
 
     /// Writes the open sessions (project and launcher) for the next start,
@@ -772,6 +783,7 @@ impl WorkspaceView {
             .bg(theme_bg())
             .when(active, |d| d.shadow(glow(color, 0x33, 18.0)))
             // A click in a pane makes it the active session.
+            .relative()
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -781,12 +793,18 @@ impl WorkspaceView {
                 }),
             )
             .child(tab.handle.view.clone())
+            .children(self.render_search_bar(id))
     }
 
     /// Gives keyboard focus to the active terminal and updates the title.
     fn focus_active(&self, window: &mut Window, cx: &mut Context<Self>) {
         // The name field keeps the keyboard until it closes.
-        if let (Some(tab), None, None) = (self.tabs.active(), &self.editor, &self.palette) {
+        if let (Some(tab), None, None, None) = (
+            self.tabs.active(),
+            &self.editor,
+            &self.palette,
+            &self.search,
+        ) {
             let handle = tab.handle.view.read(cx).focus_handle(cx);
             window.focus(&handle);
         }
@@ -1065,6 +1083,20 @@ impl WorkspaceView {
             self.on_editor_key(event, window, cx);
             return;
         }
+        if self.search.is_some() {
+            cx.stop_propagation();
+            let k = &event.keystroke;
+            let toggle = k.modifiers.control
+                && k.modifiers.shift
+                && !k.modifiers.alt
+                && k.key.eq_ignore_ascii_case("f");
+            if toggle {
+                self.close_search(window, cx);
+            } else {
+                self.on_search_key(event, window, cx);
+            }
+            return;
+        }
         if self.palette.is_some() {
             cx.stop_propagation();
             let k = &event.keystroke;
@@ -1152,6 +1184,7 @@ impl WorkspaceView {
                 }
             }
             Shortcut::ToggleSplit => self.toggle_split(window, cx),
+            Shortcut::Find => self.open_search(window, cx),
         }
     }
 

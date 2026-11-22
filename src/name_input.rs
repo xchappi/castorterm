@@ -18,9 +18,19 @@ pub enum InputAction {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NameInput {
     pub text: String,
+    /// Most characters accepted; `None` is a workspace name's limit.
+    limit: Option<usize>,
 }
 
 impl NameInput {
+    /// Empty field that accepts up to `limit` characters.
+    pub fn with_limit(limit: usize) -> Self {
+        Self {
+            text: String::new(),
+            limit: Some(limit),
+        }
+    }
+
     pub fn new(text: &str) -> Self {
         let mut input = Self::default();
         input.insert(text);
@@ -71,8 +81,9 @@ impl NameInput {
     pub fn insert(&mut self, text: &str) -> bool {
         let mut count = self.text.chars().count();
         let mut added = false;
+        let limit = self.limit.unwrap_or(MAX_WORKSPACE_NAME);
         for c in text.chars() {
-            if count >= MAX_WORKSPACE_NAME {
+            if count >= limit {
                 break;
             }
             if c.is_control() {
@@ -156,6 +167,9 @@ mod tests {
         assert_eq!(input.text, "abc");
         input.insert(&"x".repeat(MAX_WORKSPACE_NAME * 2));
         assert_eq!(input.text.chars().count(), MAX_WORKSPACE_NAME);
+        let mut long = NameInput::with_limit(200);
+        long.insert(&"x".repeat(500));
+        assert_eq!(long.text.chars().count(), 200);
         assert!(!input.insert("more"));
     }
 }

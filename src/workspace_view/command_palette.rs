@@ -32,6 +32,8 @@ impl WorkspaceView {
         if self.editor.is_some() {
             return;
         }
+        // One keyboard overlay at a time.
+        self.close_search_quietly(cx);
         let entries = self.palette_entries();
         let shown = commands::filter(&entries, "");
         self.palette = Some(Palette {
@@ -124,6 +126,11 @@ impl WorkspaceView {
                 .into(),
                 detail: "Ctrl+Shift+D".into(),
                 action: Action::ToggleSplit,
+            });
+            entries.push(Entry {
+                title: "Find in history".into(),
+                detail: "Ctrl+Shift+F".into(),
+                action: Action::Find,
             });
         }
         entries.push(Entry {
@@ -239,6 +246,7 @@ impl WorkspaceView {
                 self.open_editor(EditTarget::RenameSession(id), window, cx);
             }
             Action::ToggleSplit => self.toggle_split(window, cx),
+            Action::Find => self.open_search(window, cx),
             Action::ShowFiles => {
                 self.show_files = true;
                 self.show_tab(MiddleTab::Files, cx);

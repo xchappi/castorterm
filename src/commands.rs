@@ -17,6 +17,8 @@ pub enum Action {
     RenameSession(crate::tabs::SessionId),
     /// Split the view or go back to one session.
     ToggleSplit,
+    /// Search the active session's history.
+    Find,
     ShowFiles,
     ShowQuests,
 }

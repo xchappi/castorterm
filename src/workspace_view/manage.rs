@@ -48,6 +48,7 @@ impl WorkspaceView {
         {
             return;
         }
+        self.close_search_quietly(cx);
         let text = match target {
             EditTarget::NewWorkspace => String::new(),
             EditTarget::Rename(w) => self.tree.workspaces[w].name.clone(),
