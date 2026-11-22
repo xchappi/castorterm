@@ -15,6 +15,11 @@ pub enum Action {
     NewWorkspace,
     /// Rename an open session.
     RenameSession(crate::tabs::SessionId),
+    /// Run project action `action` on `project`.
+    RunOnProject {
+        project: usize,
+        action: usize,
+    },
     /// Split the view or go back to one session.
     ToggleSplit,
     /// Search the active session's history.

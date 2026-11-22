@@ -34,6 +34,16 @@ struct RawConfig {
     ui: RawUi,
     #[serde(default)]
     providers: Vec<RawProvider>,
+    /// Project actions; castorterm's own (local) ones when absent.
+    actions: Option<Vec<RawAction>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAction {
+    name: String,
+    prompt: String,
+    agent: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,6 +178,8 @@ pub struct Settings {
     pub zoom: f32,
     /// Human readable warnings and errors for the sidebar.
     pub messages: Vec<String>,
+    /// Project actions (buttons that open an agent with a prompt).
+    pub actions: Vec<crate::actions::ProjectAction>,
     /// Where workspace changes made from the UI are saved.
     pub config_path: Option<PathBuf>,
     /// Home directory, to expand `~` in project paths.
@@ -186,6 +198,7 @@ impl Default for Settings {
             restore_sessions: true,
             zoom: 1.0,
             messages: Vec::new(),
+            actions: crate::actions::defaults(),
             config_path: None,
             home: None,
         }
@@ -289,6 +302,35 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
             .filter(|e| !e.is_empty()),
         ..Settings::default()
     };
+
+    if let Some(actions) = raw.actions {
+        settings.actions = Vec::new();
+        for action in actions {
+            let name = action.name.trim();
+            let prompt = action.prompt.trim();
+            if name.is_empty() || prompt.is_empty() {
+                settings
+                    .messages
+                    .push("An action needs a name and a prompt: skipped".into());
+                continue;
+            }
+            if name.chars().count() > crate::actions::MAX_NAME_CHARS {
+                settings.messages.push(format!(
+                    "Action name '{name}' is longer than {} characters: skipped",
+                    crate::actions::MAX_NAME_CHARS
+                ));
+                continue;
+            }
+            settings.actions.push(crate::actions::ProjectAction {
+                name: name.to_string(),
+                prompt: prompt.to_string(),
+                agent: action
+                    .agent
+                    .map(|a| a.trim().to_string())
+                    .filter(|a| !a.is_empty()),
+            });
+        }
+    }
 
     settings.font_family = raw
         .font
@@ -758,6 +800,22 @@ mod tests {
             Some("cursor")
         );
         assert_eq!(parse("[ui]\neditor = \"\"", None).unwrap().editor, None);
+    }
+
+    #[test]
+    fn actions_default_and_override() {
+        let defaults = parse("", None).unwrap().actions;
+        assert_eq!(defaults, crate::actions::defaults());
+        let s = parse(
+            "[[actions]]\nname = \"Index\"\nprompt = \"index {project}\"\nagent = \"Claude Code\"\n\n[[actions]]\nname = \" \"\nprompt = \"x\"",
+            None,
+        )
+        .unwrap();
+        assert_eq!(s.actions.len(), 1);
+        assert_eq!(s.actions[0].agent.as_deref(), Some("Claude Code"));
+        assert_eq!(s.messages.len(), 1);
+        // An empty list turns the actions off.
+        assert!(parse("actions = []", None).unwrap().actions.is_empty());
     }
 
     #[test]

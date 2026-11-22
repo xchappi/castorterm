@@ -146,6 +146,8 @@ pub struct WorkspaceView {
     wheel_acc: f32,
     /// Pending save of the zoom (replaced, so only the last one runs).
     zoom_save: Option<gpui::Task<()>>,
+    /// Project actions (index, suggest improvements...).
+    actions: Vec<crate::actions::ProjectAction>,
     /// Editor for Ctrl+click on paths in the terminals, resolved once.
     editor_program: Option<PathBuf>,
     /// Window width at the last frame, to size the side columns.
@@ -218,6 +220,7 @@ impl WorkspaceView {
         let mut this = Self {
             tree,
             launchers: launchers(&settings.agents),
+            actions: settings.actions.clone(),
             style: TerminalStyle::new(
                 settings.font_family.as_deref(),
                 settings.font_size,
@@ -1094,6 +1097,41 @@ impl WorkspaceView {
         }
     }
 
+    /// Runs project action `index` on `project`: a session of its agent
+    /// with the action's prompt.
+    pub(super) fn run_action(
+        &mut self,
+        project: usize,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(action) = self.actions.get(index) else {
+            return;
+        };
+        let Some(launcher) = crate::actions::pick_launcher(action, &self.launchers) else {
+            self.notice = Some(match &action.agent {
+                Some(agent) => format!("'{}' needs agent '{agent}' with task_args", action.name),
+                None => "Add task_args to an agent to run project actions".into(),
+            });
+            cx.notify();
+            return;
+        };
+        let node = &self.tree.projects[project];
+        let prompt = crate::actions::render(
+            &action.prompt,
+            &node.name,
+            &node.path.to_string_lossy(),
+            node.repo.as_deref(),
+        );
+        let agent = &self.launchers[launcher];
+        let (Some(command), Some(task_args)) = (&agent.command, &agent.task_args) else {
+            return;
+        };
+        let line = board::agent_command(command, task_args, &prompt, cfg!(windows));
+        self.launch_with(project, launcher, Some(line), window, cx);
+    }
+
     /// Types the path of `file` into the active session (not executed).
     fn insert_path(&mut self, file: &Path, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.active() else {
@@ -1331,6 +1369,20 @@ impl WorkspaceView {
                             ))
                         },
                     );
+                    let actions = self.actions.iter().enumerate().filter(|_| selected).map(
+                        |(index, action)| {
+                            launcher_button(
+                                (SharedString::from(format!("action-{project}")), index),
+                                format!("\u{25C6} {}", action.name),
+                                ACCENT,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _: &ClickEvent, window, cx| {
+                                    this.run_action(project, index, window, cx)
+                                },
+                            ))
+                        },
+                    );
                     let sessions =
                         self.tabs
                             .iter()
@@ -1465,7 +1517,8 @@ impl WorkspaceView {
                                     .pl_5()
                                     .pr_1()
                                     .pb_1()
-                                    .children(launchers),
+                                    .children(launchers)
+                                    .children(actions),
                             )
                         })
                         .children(sessions)

@@ -56,6 +56,21 @@ Build your workspaces from the window, no config editing needed:
 
 Every change is saved to your config file, keeping your comments.
 
+Project actions open an agent session on the selected project with a ready
+prompt: **Index project** writes `docs/project/` (overview, stack,
+architecture, development, state) and **Suggest improvements** writes
+`docs/project/improvements.md`. They are buttons under the project in the
+sidebar and entries in the palette, and run with the first agent that has
+`task_args`. Everything stays in your repository. Replace them with your own
+in the config (an empty list turns them off):
+
+```toml
+[[actions]]
+name = "Index project"
+agent = "Claude Code"            # optional
+prompt = "Index {project} ({repo}) at {path} into our wiki."
+```
+
 Agents report the files they read and edit through the same hooks as their
 status: a "N files" button bottom left of the session lists them (W written,
 E edited, R read), with the same preview on hover and opening on click. For
