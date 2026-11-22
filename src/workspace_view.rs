@@ -154,6 +154,9 @@ pub struct WorkspaceView {
     statuses: HashMap<SessionId, AgentStatus>,
     /// Working directory each shell last reported (OSC 7 / OSC 9;9).
     cwds: HashMap<SessionId, PathBuf>,
+    /// Session whose tab or row got the last click: a double click only
+    /// renames when both clicks hit the same session.
+    last_click: Option<SessionId>,
     statuses_loading: bool,
     /// An agent started waiting since the last frame: flash the taskbar if
     /// the window is in the background.
@@ -246,6 +249,7 @@ impl WorkspaceView {
             next_status_key: 0,
             statuses: HashMap::new(),
             cwds: HashMap::new(),
+            last_click: None,
             statuses_loading: false,
             attention_pending: false,
             _status_timer: status_timer,
@@ -353,6 +357,7 @@ impl WorkspaceView {
         let gate = self.input_gate.clone();
         let view = cx.new(|cx| TerminalView::new(session, events_rx, style, gate, cx));
         let subscription = cx.subscribe_in(&view, window, Self::on_terminal_event);
+        self.drop_session_editor_unless(None);
         let id = self.tabs.open(
             project,
             &launcher.name,
@@ -405,6 +410,7 @@ impl WorkspaceView {
         }
         self.statuses.remove(&id);
         self.cwds.remove(&id);
+        self.last_click = None;
         if self.renaming_session(id) {
             self.editor = None;
             self.sync_input_gate();
@@ -422,6 +428,9 @@ impl WorkspaceView {
     }
 
     fn activate(&mut self, id: SessionId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.iter().any(|t| t.id == id) {
+            self.drop_session_editor_unless(Some(id));
+        }
         if self.tabs.activate(id) {
             // Show it: unfold its workspace for this run (not saved).
             if let Some(project) = self.tabs.active().map(|t| t.project)
@@ -608,8 +617,14 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Clicks inside the open name field belong to the field.
+        if self.renaming_session(id) {
+            return;
+        }
+        let same = self.last_click == Some(id);
+        self.last_click = Some(id);
         self.activate(id, window, cx);
-        if event.click_count() >= 2 {
+        if event.click_count() >= 2 && same {
             self.open_editor(EditTarget::RenameSession(id), window, cx);
         }
     }
@@ -1038,7 +1053,11 @@ impl WorkspaceView {
                 if let Some(id) = self.tabs.active_id()
                     && self.tabs.move_by(id, delta)
                 {
-                    self.save_state();
+                    // Not on every repeat of a held key (the state file is
+                    // fsynced); it is saved again on exit and on the next change.
+                    if !event.is_held {
+                        self.save_state();
+                    }
                     cx.notify();
                 }
             }
@@ -2032,23 +2051,30 @@ impl WorkspaceView {
                         .text_color(rgb(MUTED))
                         .hover(|s| s.bg(rgba(with_alpha(ERROR, 0x33))).text_color(rgb(ERROR)))
                         .child("×")
-                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             cx.stop_propagation();
+                            // A double click closes one session, not its neighbour too.
+                            if event.click_count() >= 2 {
+                                return;
+                            }
                             this.close(id, window, cx);
                         })),
                 )
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     this.on_session_click(id, event, window, cx)
                 }))
-                // Drag a tab onto another to take its place.
-                .on_drag(
-                    DraggedTab {
-                        id,
-                        label: tab.label.clone().into(),
-                        color,
-                    },
-                    |dragged, _, _, cx| cx.new(|_| dragged.clone()),
-                )
+                // Drag a tab onto another to take its place (not while
+                // renaming it: pressing in the field would drag the tab).
+                .when(!self.renaming_session(id), |d| {
+                    d.on_drag(
+                        DraggedTab {
+                            id,
+                            label: tab.label.clone().into(),
+                            color,
+                        },
+                        |dragged, _, _, cx| cx.new(|_| dragged.clone()),
+                    )
+                })
                 .drag_over::<DraggedTab>(move |style, dragged, _, _| {
                     if dragged.id == id {
                         style

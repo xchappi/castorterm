@@ -130,6 +130,8 @@ mod tests {
         assert!(!Shortcut::ToggleFiles.repeats());
         assert!(Shortcut::NextSession.repeats());
         assert!(Shortcut::PrevSession.repeats());
+        assert!(Shortcut::MoveSessionLeft.repeats());
+        assert!(Shortcut::MoveSessionRight.repeats());
     }
 
     #[test]

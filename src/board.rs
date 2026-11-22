@@ -157,7 +157,22 @@ fn label(text: &str) -> String {
 /// zero-width characters) that could hide or reorder displayed text.
 pub(crate) fn is_hidden(c: char) -> bool {
     c.is_control()
-        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{034F}'
+                | '\u{061C}'
+                | '\u{115F}'
+                | '\u{1160}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{3164}'
+                | '\u{FEFF}'
+                | '\u{FFA0}'
+        )
 }
 
 /// Collapses control and invisible formatting characters (newlines

@@ -128,11 +128,13 @@ impl<T> Tabs<T> {
     }
 
     /// Renames a session. The label is trimmed, single-line and at most
-    /// [`MAX_LABEL_CHARS`] characters; returns false if it is not usable.
+    /// [`MAX_SESSION_LABEL_CHARS`] characters; returns false if it is not usable.
     pub fn rename(&mut self, id: SessionId, label: &str) -> bool {
         let label = label.trim();
         let ok = !label.is_empty()
-            && label.chars().count() <= MAX_LABEL_CHARS
+            && label.chars().count() <= MAX_SESSION_LABEL_CHARS
+            // Bounds stacks of combining marks too.
+            && label.len() <= MAX_SESSION_LABEL_CHARS * 4
             && !label.chars().any(crate::board::is_hidden);
         match self.tabs.iter_mut().find(|t| t.id == id) {
             Some(tab) if ok => {
@@ -169,7 +171,7 @@ impl<T> Tabs<T> {
 }
 
 /// Longest session name accepted when renaming.
-pub const MAX_LABEL_CHARS: usize = 40;
+pub const MAX_SESSION_LABEL_CHARS: usize = 40;
 
 #[cfg(test)]
 mod tests {
@@ -197,9 +199,38 @@ mod tests {
         assert!(!t.rename(a, "   "));
         assert!(!t.rename(a, "a\nb"));
         assert!(!t.rename(a, "a\u{202E}b"));
-        assert!(!t.rename(a, &"x".repeat(MAX_LABEL_CHARS + 1)));
+        assert!(!t.rename(a, &"x".repeat(MAX_SESSION_LABEL_CHARS + 1)));
         assert!(!t.rename(999, "x"));
         assert_eq!(order(&t)[0], "Reviewer");
+    }
+
+    #[test]
+    fn rename_limits() {
+        let (mut t, [a, ..]) = abc();
+        assert!(t.rename(a, &"x".repeat(MAX_SESSION_LABEL_CHARS)));
+        assert!(t.rename(a, &"\u{1F980}".repeat(MAX_SESSION_LABEL_CHARS)));
+        assert!(!t.rename(a, "a\u{2028}b"));
+        assert!(!t.rename(a, "a\u{2060}b"));
+        assert!(!t.rename(a, &format!("a{}", "\u{301}".repeat(200))));
+    }
+
+    #[test]
+    fn move_the_active_session_and_edges() {
+        let (mut t, [a, b, c]) = abc();
+        t.activate(a);
+        assert!(t.move_by(a, 1));
+        assert_eq!(order(&t), ["B", "A", "C"]);
+        assert_eq!(t.active_id(), Some(a));
+        assert!(t.move_by(a, isize::MAX));
+        assert_eq!(order(&t), ["B", "C", "A"]);
+        assert!(t.move_by(a, isize::MIN));
+        assert_eq!(order(&t), ["A", "B", "C"]);
+        assert!(!t.move_by(999, 1));
+        let _ = (b, c);
+        let mut empty: Tabs<()> = Tabs::default();
+        assert!(!empty.move_by(1, 1));
+        assert!(!empty.move_to(1, 0));
+        assert!(!empty.rename(1, "x"));
     }
 
     #[test]

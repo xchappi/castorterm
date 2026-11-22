@@ -392,4 +392,19 @@ mod tests {
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn labels_are_optional_in_the_file() {
+        let old: SavedState =
+            serde_json::from_str(r#"{"sessions":[{"project":"/a","launcher":"Shell"}]}"#).unwrap();
+        assert_eq!(old.sessions[0].label, None);
+        let json = serde_json::to_string(&old).unwrap();
+        assert!(!json.contains("label"));
+        let mut named = old.clone();
+        named.sessions[0].label = Some("Reviewer".into());
+        let json = serde_json::to_string(&named).unwrap();
+        assert!(json.contains(r#""label":"Reviewer""#));
+        let back: SavedState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, named);
+    }
 }

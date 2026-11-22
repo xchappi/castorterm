@@ -41,6 +41,13 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Typing a workspace name is not discarded by a stray double click;
+        // the same field is not reopened (that would lose what was typed).
+        if let Some(open) = &self.editor
+            && (open.target == target || !matches!(open.target, EditTarget::RenameSession(_)))
+        {
+            return;
+        }
         let text = match target {
             EditTarget::NewWorkspace => String::new(),
             EditTarget::Rename(w) => self.tree.workspaces[w].name.clone(),
@@ -115,7 +122,7 @@ impl WorkspaceView {
             if !self.tabs.rename(id, &label) && self.tabs.iter().any(|t| t.id == id) {
                 editor.error = Some(format!(
                     "1-{} visible characters",
-                    crate::tabs::MAX_LABEL_CHARS
+                    crate::tabs::MAX_SESSION_LABEL_CHARS
                 ));
                 cx.notify();
                 return;
@@ -402,6 +409,13 @@ impl WorkspaceView {
                     .text_color(rgb(TEXT))
                     .child(SharedString::from(editor.input.text.clone()))
                     .child(div().w(px(2.0)).h(px(14.0)).ml(px(1.0)).bg(rgb(ACCENT)))
+                    .children(editor.error.clone().map(|error| {
+                        div()
+                            .ml_2()
+                            .text_size(ui(SMALL_TEXT_SIZE))
+                            .text_color(rgb(ERROR))
+                            .child(SharedString::from(error))
+                    }))
                     .into_any_element(),
             );
         }
@@ -442,6 +456,17 @@ impl WorkspaceView {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// Cancels a session rename unless it is for `keep` (the session that
+    /// is becoming active): keys must not go to a field the user left.
+    pub(super) fn drop_session_editor_unless(&mut self, keep: Option<crate::tabs::SessionId>) {
+        if let Some(EditTarget::RenameSession(id)) = self.editor.as_ref().map(|e| e.target)
+            && Some(id) != keep
+        {
+            self.editor = None;
+            self.sync_input_gate();
+        }
     }
 
     /// Whether the name field is renaming session `id`.
