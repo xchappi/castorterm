@@ -56,6 +56,16 @@ Build your workspaces from the window, no config editing needed:
 
 Every change is saved to your config file, keeping your comments.
 
+Paths and URLs in the output are links. Rest the mouse on a file path
+(`src/view.rs:120`, `out/screenshot.png`) to preview it over the terminal: an
+excerpt around that line, or the image. Ctrl+click opens it: URLs in the
+browser, code in your editor at that line (`code -g`; set `editor = "cursor"`
+or another VS Code-like editor under `[ui]`), images and documents with their
+default program. Programs, scripts and web pages are never run from a link
+(they are shown in the file manager), and network paths, mapped network
+drives and links on the way are ignored. An image pasted into an agent (Ctrl+V or right click) is
+shown for a few seconds.
+
 The mouse works in the terminal: drag to select text (double click: word,
 triple: line), right click to copy the selection or paste. Programs that read
 the mouse (OpenCode, vim, htop, lazygit) get clicks, drags and the wheel; hold

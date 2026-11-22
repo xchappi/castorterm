@@ -2,7 +2,9 @@
 
 use std::cell::Cell;
 use std::ops::Range;
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use alacritty_terminal::grid::{Dimensions as _, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point as GridPoint, Side};
@@ -20,6 +22,8 @@ use gpui::{
     UTF16Selection, Window, canvas, div, fill, font, point, prelude::*, px, size,
 };
 
+use gpui::{ClipboardEntry, Image, ImageSource, ObjectFit, img};
+
 use crate::keys::{KeyMode, Mods, encode_key};
 use crate::palette::{DEFAULT_THEME, Rgb8};
 use crate::session::{GridSize, Session, SessionEvent};
@@ -35,6 +39,168 @@ const FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT: f32 = 1.3;
 /// Pixels of wheel movement per scrolled line.
 const WHEEL_LINE_PX: f32 = 18.0;
+/// Mouse rest on a path before its preview loads.
+const HOVER_PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_millis(450);
+/// How long a pasted image stays shown.
+const PASTED_PREVIEW_TIME: std::time::Duration = std::time::Duration::from_secs(8);
+/// Biggest file read for a text preview, and biggest image shown.
+const PREVIEW_TEXT_BYTES: u64 = 64 * 1024;
+/// Read further when the link points at a line deep in the file.
+const PREVIEW_TEXT_BYTES_TO_LINE: u64 = 2 * 1024 * 1024;
+const PREVIEW_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+/// Images are decoded to RGBA: refuse huge ones from their header (a small
+/// PNG can declare 65535x65535 pixels, 17 GB decoded).
+const PREVIEW_IMAGE_MAX_SIDE: u32 = 16_384;
+const PREVIEW_IMAGE_MAX_PIXELS: u64 = 40_000_000;
+/// Lines shown in a text preview.
+const PREVIEW_LINES: usize = 14;
+const PREVIEW_WIDTH: f32 = 420.0;
+const PREVIEW_HEIGHT: f32 = 260.0;
+/// Underline of a link under Ctrl.
+const LINK_UNDERLINE: Rgb8 = Rgb8 {
+    r: 0x4d,
+    g: 0xd2,
+    b: 0xff,
+};
+
+/// The floating preview.
+struct Preview {
+    title: String,
+    content: PreviewContent,
+}
+
+enum PreviewContent {
+    Image(PathBuf),
+    Pasted(Arc<Image>),
+    Text {
+        lines: Vec<(usize, String)>,
+        /// Line the link points at, highlighted.
+        line: Option<u32>,
+    },
+}
+
+/// Reads what the preview of `path` shows (on a background thread): images
+/// by path, text as an excerpt around `line`. `None` for folders, missing,
+/// huge or binary files.
+fn load_preview(path: &std::path::Path, line: Option<u32>) -> Option<Preview> {
+    use std::io::Read as _;
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let title = path.file_name()?.to_string_lossy().into_owned();
+    let content = match crate::links::kind(path) {
+        crate::links::Kind::Image => {
+            if meta.len() > PREVIEW_IMAGE_BYTES || !image_size_ok(path) {
+                return None;
+            }
+            PreviewContent::Image(path.to_path_buf())
+        }
+        crate::links::Kind::Text => {
+            let mut bytes = Vec::new();
+            std::fs::File::open(path)
+                .ok()?
+                .take(if line.is_some() {
+                    PREVIEW_TEXT_BYTES_TO_LINE
+                } else {
+                    PREVIEW_TEXT_BYTES
+                })
+                .read_to_end(&mut bytes)
+                .ok()?;
+            let text = String::from_utf8_lossy(&bytes);
+            let lines = crate::links::text_excerpt(&text, line, PREVIEW_LINES)?;
+            if lines.is_empty() {
+                return None;
+            }
+            PreviewContent::Text { lines, line }
+        }
+    };
+    Some(Preview { title, content })
+}
+
+/// Whether the image's header declares a size it is safe to decode.
+fn image_size_ok(path: &std::path::Path) -> bool {
+    image::ImageReader::open(path)
+        .and_then(|r| r.with_guessed_format())
+        .ok()
+        .and_then(|r| r.into_dimensions().ok())
+        .is_some_and(|(w, h)| {
+            w > 0
+                && h > 0
+                && w <= PREVIEW_IMAGE_MAX_SIDE
+                && h <= PREVIEW_IMAGE_MAX_SIDE
+                && u64::from(w) * u64::from(h) <= PREVIEW_IMAGE_MAX_PIXELS
+        })
+}
+
+/// What Ctrl+click on a file does.
+enum OpenAction {
+    /// Opened in the editor already.
+    Edited,
+    System(PathBuf),
+    Reveal(PathBuf),
+}
+
+/// Decides (and for the editor, does) what opening a path link means. Runs
+/// off the UI thread: it touches the file system.
+fn decide_open(
+    raw: &str,
+    line: Option<u32>,
+    col: Option<u32>,
+    project: Option<&std::path::Path>,
+    cwd: Option<&std::path::Path>,
+    editor: Option<&std::path::Path>,
+) -> Option<OpenAction> {
+    let full = crate::links::locate(raw, project, cwd)?;
+    let file = full.is_file();
+    let image = crate::links::kind(&full) == crate::links::Kind::Image;
+    if file
+        && !image
+        && let Some(editor) = editor
+        && open_in_editor(editor, &crate::links::goto_argument(&full, line, col))
+    {
+        return Some(OpenAction::Edited);
+    }
+    Some(if file && crate::links::safe_to_open(&full) {
+        OpenAction::System(full)
+    } else {
+        OpenAction::Reveal(full)
+    })
+}
+
+/// Starts `editor -g target` without a console; false if it could not
+/// start (or the target cannot pass through a `.cmd` shim safely).
+fn open_in_editor(editor: &std::path::Path, target: &str) -> bool {
+    let shim = editor
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"));
+    if shim && !crate::links::safe_for_cmd(target) {
+        return false;
+    }
+    let mut command = std::process::Command::new(editor);
+    command
+        .args(["-g", target])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(0x0800_0000);
+    }
+    match command.spawn() {
+        Ok(mut child) => {
+            // Reap it without blocking the UI.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// Most wheel events reported to a program for one wheel event.
 const MAX_WHEEL_EVENTS: u32 = 10;
 /// Background of selected text.
@@ -121,6 +287,24 @@ pub struct TerminalView {
     agent: bool,
     /// Menu option pressed; chosen on release in the same cell.
     pending_menu: Option<(usize, usize)>,
+    /// Relative paths in the output are resolved against the project
+    /// first, then against the directory the shell last reported.
+    project_dir: Option<PathBuf>,
+    cwd: Option<PathBuf>,
+    /// Cell and Ctrl state of the last hover check (skipped if unchanged).
+    hover_cell: Option<(usize, usize, bool)>,
+    /// Hides a pasted image after a while (dropping it cancels it).
+    paste_timer: Option<Task<()>>,
+    /// Editor for Ctrl+click on paths (absolute path), if found.
+    editor: Option<PathBuf>,
+    /// Link under the mouse: `(row, start, end, target)`.
+    hover: Option<(usize, usize, usize, crate::links::Target)>,
+    /// Ctrl held during the last mouse move (links are underlined).
+    ctrl: bool,
+    /// Floating preview over the terminal.
+    preview: Option<Preview>,
+    /// Pending preview load or auto-hide (dropping it cancels it).
+    preview_task: Option<Task<()>>,
     _events: Task<()>,
 }
 
@@ -340,7 +524,14 @@ impl TerminalView {
                             SessionEvent::PtyWrite(text) => view.session.write(text.into_bytes()),
                             SessionEvent::Exit => exited = true,
                             // Only the last one of a burst matters.
-                            SessionEvent::Cwd(dir) => cwd = Some(dir),
+                            SessionEvent::Cwd(dir) => {
+                                // Reported by the program: kept only if it is
+                                // a plain local-looking absolute path.
+                                if let Some(dir) = crate::links::resolve(&dir, None) {
+                                    view.cwd = Some(dir);
+                                }
+                                cwd = Some(dir);
+                            }
                         }
                     }
                     if let Some(dir) = cwd {
@@ -372,6 +563,15 @@ impl TerminalView {
             selecting: false,
             agent: false,
             pending_menu: None,
+            project_dir: None,
+            cwd: None,
+            hover_cell: None,
+            paste_timer: None,
+            editor: None,
+            hover: None,
+            ctrl: false,
+            preview: None,
+            preview_task: None,
             _events: events_task,
         }
     }
@@ -510,6 +710,16 @@ impl TerminalView {
             return;
         }
         self.scroll_lines(whole, cx);
+        // The text under the mouse moved: look again on the next move.
+        self.hover_cell = None;
+        self.hover = None;
+        if !matches!(
+            self.preview.as_ref().map(|p| &p.content),
+            Some(PreviewContent::Pasted(_))
+        ) {
+            self.preview = None;
+            self.preview_task = None;
+        }
     }
 
     /// Mouse press: reported to programs that read the mouse; otherwise the
@@ -533,6 +743,15 @@ impl TerminalView {
             return;
         };
         let (col, row, side) = metrics.cell(event.position);
+        // Ctrl+click opens a link, in any program.
+        if button == crate::mouse::Button::Left
+            && event.modifiers.control
+            && focused
+            && let Some(link) = crate::links::link_at(&self.row_text(row), col)
+        {
+            self.open_link(&link.target, cx);
+            return;
+        }
         let reporting = reporting(*self.session.term().lock().mode());
         if reporting.active() && !event.modifiers.shift {
             if !focused {
@@ -598,6 +817,9 @@ impl TerminalView {
             && let Some(button) = self.reported.take()
         {
             self.report_release(button, col, row, event.modifiers);
+        }
+        if event.pressed_button.is_none() && !self.selecting {
+            self.hover_link(col, row, event.modifiers.control, cx);
         }
         if self.selecting {
             if event.pressed_button != Some(MouseButton::Left) || self.gate.paused() {
@@ -738,6 +960,244 @@ impl TerminalView {
         }
     }
 
+    /// Where relative paths are resolved (the project) and which editor
+    /// Ctrl+click opens files in.
+    pub fn set_links(&mut self, project_dir: PathBuf, editor: Option<PathBuf>) {
+        self.project_dir = Some(project_dir);
+        self.editor = editor;
+    }
+
+    /// Text of visible row `row`, one char per cell.
+    fn row_text(&self, row: usize) -> Vec<char> {
+        let term = self.session.term().lock();
+        if row >= term.screen_lines() {
+            return Vec::new();
+        }
+        let offset = term.grid().display_offset() as i32;
+        let line = &term.grid()[Line(row as i32 - offset)];
+        (0..term.columns()).map(|c| line[Column(c)].c).collect()
+    }
+
+    /// Updates the link under the mouse; schedules a preview of a file
+    /// after the mouse rests on it.
+    fn hover_link(&mut self, col: usize, row: usize, ctrl: bool, cx: &mut Context<Self>) {
+        if self.hover_cell == Some((col, row, ctrl)) {
+            return;
+        }
+        self.hover_cell = Some((col, row, ctrl));
+        let link = crate::links::link_at(&self.row_text(row), col);
+        let key = link.as_ref().map(|l| (row, l.start, l.end));
+        let same = self.hover.as_ref().map(|h| (h.0, h.1, h.2)) == key;
+        if same && ctrl == self.ctrl {
+            return;
+        }
+        self.ctrl = ctrl;
+        if same {
+            cx.notify();
+            return;
+        }
+        self.hover = link.map(|l| (row, l.start, l.end, l.target));
+        // A pasted image stays until it times out; other previews follow
+        // the mouse.
+        if !matches!(
+            self.preview.as_ref().map(|p| &p.content),
+            Some(PreviewContent::Pasted(_))
+        ) {
+            self.preview = None;
+            self.preview_task = None;
+        }
+        if let Some((_, _, _, crate::links::Target::Path { path, line, .. })) = &self.hover {
+            let (raw, line) = (path.clone(), *line);
+            let (project, cwd) = (self.project_dir.clone(), self.cwd.clone());
+            let key = key.expect("hovering a link");
+            self.preview_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(HOVER_PREVIEW_DELAY).await;
+                let loaded = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let full = crate::links::locate(&raw, project.as_deref(), cwd.as_deref())?;
+                        load_preview(&full, line)
+                    })
+                    .await;
+                let _ = this.update(cx, |view, cx| {
+                    let still = view.hover.as_ref().map(|h| (h.0, h.1, h.2)) == Some(key);
+                    let pasted = matches!(
+                        view.preview.as_ref().map(|p| &p.content),
+                        Some(PreviewContent::Pasted(_))
+                    );
+                    if still
+                        && !pasted
+                        && let Some(preview) = loaded
+                    {
+                        view.preview = Some(preview);
+                        cx.notify();
+                    }
+                });
+            }));
+        }
+        cx.notify();
+    }
+
+    /// Opens a link: URLs in the browser; files in the editor (code) or
+    /// with the system (documents and images only); anything else is shown
+    /// in the file manager, never run.
+    fn open_link(&self, target: &crate::links::Target, cx: &mut Context<Self>) {
+        use crate::links::Target;
+        match target {
+            // Only web links reach the browser (find_links makes no other).
+            Target::Url(url) if url.starts_with("http") => cx.open_url(url),
+            Target::Url(_) => {}
+            Target::Path { path, line, col } => {
+                let (raw, line, col) = (path.clone(), *line, *col);
+                let (project, cwd) = (self.project_dir.clone(), self.cwd.clone());
+                let editor = self.editor.clone();
+                cx.spawn(async move |_, cx| {
+                    let action = cx
+                        .background_executor()
+                        .spawn(async move {
+                            decide_open(
+                                &raw,
+                                line,
+                                col,
+                                project.as_deref(),
+                                cwd.as_deref(),
+                                editor.as_deref(),
+                            )
+                        })
+                        .await;
+                    let _ = cx.update(|cx| match action {
+                        Some(OpenAction::System(path)) => cx.open_with_system(&path),
+                        Some(OpenAction::Reveal(path)) => cx.reveal_path(&path),
+                        Some(OpenAction::Edited) | None => {}
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+
+    /// Shows the image just pasted into an agent for a few seconds.
+    fn show_pasted_image(&mut self, image: Arc<Image>, cx: &mut Context<Self>) {
+        self.preview = Some(Preview {
+            title: "Pasted image".into(),
+            content: PreviewContent::Pasted(image),
+        });
+        self.preview_task = None;
+        self.paste_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PASTED_PREVIEW_TIME).await;
+            let _ = this.update(cx, |view, cx| {
+                if matches!(
+                    view.preview.as_ref().map(|p| &p.content),
+                    Some(PreviewContent::Pasted(_))
+                ) {
+                    view.preview = None;
+                    cx.notify();
+                }
+            });
+        }));
+        cx.notify();
+    }
+
+    /// The image in the clipboard, if it holds one.
+    fn clipboard_image(cx: &mut Context<Self>) -> Option<Arc<Image>> {
+        let item = cx.read_from_clipboard()?;
+        // Copies from a browser carry text too: that is what gets pasted.
+        if item
+            .entries()
+            .iter()
+            .any(|e| matches!(e, ClipboardEntry::String(_)))
+        {
+            return None;
+        }
+        item.entries().iter().find_map(|e| match e {
+            ClipboardEntry::Image(image) => Some(Arc::new(image.clone())),
+            _ => None,
+        })
+    }
+
+    /// The floating preview, bottom right of the terminal.
+    fn render_preview(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        use crate::theme::{
+            ACCENT, BORDER, MUTED, PANEL_BG, SMALL_TEXT_SIZE, TEXT, ui, with_alpha,
+        };
+        let preview = self.preview.as_ref()?;
+        let body = match &preview.content {
+            PreviewContent::Image(path) => div().child(
+                img(path.clone())
+                    .max_w(px(PREVIEW_WIDTH))
+                    .max_h(px(PREVIEW_HEIGHT))
+                    .object_fit(ObjectFit::Contain),
+            ),
+            PreviewContent::Pasted(image) => div().child(
+                img(ImageSource::Image(image.clone()))
+                    .max_w(px(PREVIEW_WIDTH))
+                    .max_h(px(PREVIEW_HEIGHT))
+                    .object_fit(ObjectFit::Contain),
+            ),
+            PreviewContent::Text { lines, line } => div()
+                .flex()
+                .flex_col()
+                .font_family(self.style.family.clone())
+                .text_size(ui(SMALL_TEXT_SIZE))
+                .children(lines.iter().map(|(n, text)| {
+                    let mark = Some(*n as u32) == *line;
+                    div()
+                        .flex()
+                        .gap_2()
+                        .when(mark, |d| d.bg(gpui::rgba(with_alpha(ACCENT, 0x22))))
+                        .child(
+                            div()
+                                .w(px(36.0))
+                                .flex_none()
+                                .text_color(gpui::rgb(MUTED))
+                                .child(SharedString::from(n.to_string())),
+                        )
+                        .child(
+                            div()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_color(gpui::rgb(TEXT))
+                                .child(SharedString::from(text.clone())),
+                        )
+                })),
+        };
+        Some(
+            div()
+                .id("preview")
+                .absolute()
+                .bottom(px(8.0))
+                .right(px(8.0))
+                .max_w(px(PREVIEW_WIDTH + 24.0))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2()
+                .rounded_md()
+                .border_1()
+                .border_color(gpui::rgb(BORDER))
+                .bg(gpui::rgb(PANEL_BG))
+                .shadow_lg()
+                .occlude()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .text_size(ui(SMALL_TEXT_SIZE))
+                        .text_color(gpui::rgb(MUTED))
+                        .child(SharedString::from(format!(
+                            "{} · click to close",
+                            preview.title
+                        ))),
+                )
+                .child(body)
+                .on_click(cx.listener(|view, _: &gpui::ClickEvent, _, cx| {
+                    view.preview = None;
+                    view.preview_task = None;
+                    cx.notify();
+                }))
+                .into_any_element(),
+        )
+    }
+
     /// Marks the session as an agent's, whose menus can be clicked.
     pub fn set_agent(&mut self, agent: bool) {
         self.agent = agent;
@@ -768,6 +1228,15 @@ impl TerminalView {
     /// asked for it, so a pasted command is not run line by line).
     fn paste(&mut self, cx: &mut Context<Self>) {
         if self.gate.paused() {
+            return;
+        }
+        // An image for an agent: it reads the clipboard on Ctrl+V itself.
+        if self.agent
+            && let Some(image) = Self::clipboard_image(cx)
+        {
+            self.follow_output();
+            self.session.write(vec![0x16]);
+            self.show_pasted_image(image, cx);
             return;
         }
         let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) else {
@@ -854,6 +1323,15 @@ impl TerminalView {
         if let Some(bytes) = encode_key(&keystroke.key, mods, mode) {
             self.follow_output();
             self.session.write(bytes);
+            // Agents read images from the clipboard on Ctrl+V: show it.
+            if self.agent
+                && mods.ctrl
+                && !mods.shift
+                && key == "v"
+                && let Some(image) = Self::clipboard_image(cx)
+            {
+                self.show_pasted_image(image, cx);
+            }
             // Stop here so the key does not also arrive as text input.
             cx.stop_propagation();
         }
@@ -874,6 +1352,12 @@ impl Render for TerminalView {
         let focus_handle = self.focus_handle.clone();
         let entity = cx.entity();
         let metrics = self.metrics.clone();
+        let underline = self
+            .hover
+            .as_ref()
+            .filter(|_| self.ctrl)
+            .map(|h| (h.0, h.1, h.2));
+        let preview = self.render_preview(cx);
         // Follow the match as output scrolls it; drop it if it is gone.
         let highlight = self.search.as_mut().and_then(|search| {
             search.relocate(&session.term().lock());
@@ -881,8 +1365,26 @@ impl Render for TerminalView {
         });
 
         div()
+            .id("terminal")
+            .relative()
             .size_full()
             .bg(to_hsla(DEFAULT_THEME.background, 1.0))
+            .when(underline.is_some(), |d| d.cursor_pointer())
+            .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
+                if !*hovered {
+                    view.hover_cell = None;
+                }
+                if !*hovered && view.hover.take().is_some() {
+                    if !matches!(
+                        view.preview.as_ref().map(|p| &p.content),
+                        Some(PreviewContent::Pasted(_))
+                    ) {
+                        view.preview = None;
+                        view.preview_task = None;
+                    }
+                    cx.notify();
+                }
+            }))
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
@@ -900,6 +1402,7 @@ impl Render for TerminalView {
                             &session,
                             &style,
                             highlight.as_ref(),
+                            underline,
                             &metrics,
                             bounds,
                             window,
@@ -919,6 +1422,7 @@ impl Render for TerminalView {
                 )
                 .size_full(),
             )
+            .children(preview)
     }
 }
 
@@ -934,6 +1438,7 @@ fn layout_frame(
     session: &Session,
     style: &TerminalStyle,
     highlight: Option<&Match>,
+    underline: Option<(usize, usize, usize)>,
     metrics: &Cell<Option<GridMetrics>>,
     bounds: Bounds<Pixels>,
     window: &mut Window,
@@ -1045,6 +1550,23 @@ fn layout_frame(
                 quads.push(fill(
                     Bounds::new(cell_origin(col, row), size(cell_width, line_height)),
                     to_hsla(bg, 1.0),
+                ));
+            }
+        }
+
+        // Ctrl over a link: underline it.
+        if let Some((row, start, end)) = underline
+            && row < rows
+        {
+            let end = end.min(cols);
+            if start < end {
+                let origin = cell_origin(start, row);
+                quads.push(fill(
+                    Bounds::new(
+                        point(origin.x, origin.y + line_height - px(2.0)),
+                        size(cell_width * (end - start) as f32, px(1.0)),
+                    ),
+                    to_hsla(LINK_UNDERLINE, 1.0),
                 ));
             }
         }
@@ -1312,6 +1834,82 @@ mod tests {
         assert_eq!(moved.start().line.0, m.start().line.0 - 2);
         // Another text there (wrong history size): dropped, no panic.
         assert_eq!(relocate(&term, &m, &text, history + 2), None);
+    }
+
+    #[test]
+    fn previews_load_text_and_skip_binaries() {
+        let dir = std::env::temp_dir().join(format!("castorterm-preview-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = dir.join("a.rs");
+        std::fs::write(
+            &text,
+            (1..=30).map(|n| format!("line {n}\n")).collect::<String>(),
+        )
+        .unwrap();
+        let bin = dir.join("b.dat");
+        std::fs::write(&bin, b"ab\0cd").unwrap();
+        match load_preview(&text, Some(10)).map(|p| p.content) {
+            Some(PreviewContent::Text { lines, line }) => {
+                assert_eq!(line, Some(10));
+                assert_eq!(lines[0].0, 7);
+                assert_eq!(lines.len(), PREVIEW_LINES);
+            }
+            _ => panic!("text preview expected"),
+        }
+        assert!(load_preview(&bin, None).is_none());
+        assert!(load_preview(&dir, None).is_none());
+        assert!(load_preview(&dir.join("missing.rs"), None).is_none());
+        let png = dir.join("c.png");
+        std::fs::write(&png, b"not really").unwrap();
+        assert!(load_preview(&png, None).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A PNG with only a header declaring `w`x`h` pixels.
+    fn png_header(w: u32, h: u32) -> Vec<u8> {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc = 0xffff_ffffu32;
+            for &b in data {
+                crc ^= u32::from(b);
+                for _ in 0..8 {
+                    crc = if crc & 1 != 0 {
+                        (crc >> 1) ^ 0xedb8_8320
+                    } else {
+                        crc >> 1
+                    };
+                }
+            }
+            !crc
+        }
+        let mut ihdr = b"IHDR".to_vec();
+        ihdr.extend(w.to_be_bytes());
+        ihdr.extend(h.to_be_bytes());
+        ihdr.extend([8, 2, 0, 0, 0]);
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend(13u32.to_be_bytes());
+        png.extend(&ihdr);
+        png.extend(crc32(&ihdr).to_be_bytes());
+        // The decoder reads the header up to the first data chunk.
+        for chunk in [&b"IDAT"[..], &b"IEND"[..]] {
+            png.extend(0u32.to_be_bytes());
+            png.extend(chunk);
+            png.extend(crc32(chunk).to_be_bytes());
+        }
+        png
+    }
+
+    #[test]
+    fn huge_images_are_not_previewed() {
+        let dir = std::env::temp_dir().join(format!("castorterm-bomb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bomb = dir.join("bomb.png");
+        std::fs::write(&bomb, png_header(65_535, 65_535)).unwrap();
+        assert!(!image_size_ok(&bomb));
+        assert!(load_preview(&bomb, None).is_none());
+        let small = dir.join("small.png");
+        std::fs::write(&small, png_header(640, 480)).unwrap();
+        assert!(image_size_ok(&small));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

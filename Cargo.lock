@@ -773,6 +773,7 @@ dependencies = [
  "anyhow",
  "futures",
  "gpui",
+ "image",
  "libc",
  "polling",
  "raw-window-handle",
@@ -780,6 +781,7 @@ dependencies = [
  "serde_json",
  "toml 0.8.23",
  "toml_edit 0.22.27",
+ "windows-sys 0.59.0",
  "winresource",
 ]
 

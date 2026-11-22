@@ -13,6 +13,7 @@ mod config_edit;
 mod files;
 mod git_remote;
 mod keys;
+mod links;
 mod mouse;
 mod name_input;
 mod palette;
