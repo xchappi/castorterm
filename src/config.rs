@@ -38,6 +38,20 @@ struct RawConfig {
     actions: Option<Vec<RawAction>>,
 }
 
+/// A plugin file (`<config dir>/plugins/*.toml`): only task providers and
+/// project actions.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPlugin {
+    #[serde(default)]
+    providers: Vec<RawProvider>,
+    actions: Option<Vec<RawAction>>,
+}
+
+/// Plugin files read at most, and their size limit.
+const MAX_PLUGINS: usize = 20;
+const MAX_PLUGIN_BYTES: u64 = 256 * 1024;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAction {
@@ -263,12 +277,19 @@ pub fn load(env: &Env) -> Settings {
             ..Settings::default()
         };
     };
+    let plugins = read_plugins(&path.with_file_name("plugins"));
     let settings = match std::fs::read_to_string(&path) {
-        Ok(text) => parse(&text, env.home.as_deref()).unwrap_or_else(|err| Settings {
-            messages: vec![format!("Config {}: {err}", path.display())],
-            ..Settings::default()
-        }),
-        Err(err) if err.kind() == ErrorKind::NotFound => Settings::default(),
+        Ok(text) => {
+            parse_with_plugins(&text, env.home.as_deref(), &plugins).unwrap_or_else(|err| {
+                Settings {
+                    messages: vec![format!("Config {}: {err}", path.display())],
+                    ..Settings::default()
+                }
+            })
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            parse_with_plugins("", env.home.as_deref(), &plugins).unwrap_or_default()
+        }
         Err(err) => Settings {
             messages: vec![format!("Could not read config {}: {err}", path.display())],
             ..Settings::default()
@@ -281,16 +302,84 @@ pub fn load(env: &Env) -> Settings {
     }
 }
 
+/// The plugin files in `dir` (`*.toml`, by name, bounded): `(name, text)`.
+/// Unreadable or oversized ones come back as an error text.
+fn read_plugins(dir: &Path) -> Vec<(String, Result<String, String>)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "toml") && p.is_file())
+        .collect();
+    files.sort();
+    files
+        .into_iter()
+        .take(MAX_PLUGINS)
+        .map(|path| {
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let text = match std::fs::metadata(&path) {
+                Ok(m) if m.len() > MAX_PLUGIN_BYTES => Err("too large".to_string()),
+                _ => std::fs::read_to_string(&path).map_err(|e| e.to_string()),
+            };
+            (name, text)
+        })
+        .collect()
+}
+
 /// Parses the TOML text. Syntax and schema errors fail the whole file;
 /// invalid individual entries are skipped with a message.
+#[cfg(test)]
 pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
-    let raw: RawConfig = toml::from_str(text).map_err(|e| match e.span() {
+    parse_with_plugins(text, home, &[])
+}
+
+/// Like [`parse`], adding the providers and actions of plugin files. The
+/// config wins over a plugin provider of the same name; actions from the
+/// config and plugins together replace the built-in ones.
+fn parse_with_plugins(
+    text: &str,
+    home: Option<&Path>,
+    plugins: &[(String, Result<String, String>)],
+) -> Result<Settings, String> {
+    let mut raw: RawConfig = toml::from_str(text).map_err(|e| match e.span() {
         Some(span) => {
             let line = text[..span.start.min(text.len())].matches('\n').count() + 1;
             format!("line {line}: {}", e.message())
         }
         None => e.message().to_string(),
     })?;
+    let mut plugin_messages = Vec::new();
+    for (name, text) in plugins {
+        let plugin = text
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|t| toml::from_str::<RawPlugin>(t).map_err(|e| e.message().to_string()));
+        let plugin = match plugin {
+            Ok(plugin) => plugin,
+            Err(err) => {
+                plugin_messages.push(format!("Plugin {name}: {err}"));
+                continue;
+            }
+        };
+        for provider in plugin.providers {
+            let taken = raw
+                .providers
+                .iter()
+                .any(|p| p.name.trim() == provider.name.trim());
+            if !taken {
+                raw.providers.push(provider);
+            }
+        }
+        if let Some(actions) = plugin.actions {
+            raw.actions.get_or_insert_with(Vec::new).extend(actions);
+        }
+    }
     let mut settings = Settings {
         scanlines: raw.ui.scanlines.unwrap_or(true),
         restore_sessions: raw.ui.restore_sessions.unwrap_or(true),
@@ -303,6 +392,7 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
         ..Settings::default()
     };
 
+    settings.messages.append(&mut plugin_messages);
     if let Some(actions) = raw.actions {
         settings.actions = Vec::new();
         for action in actions {
@@ -833,6 +923,42 @@ mod tests {
         assert_eq!(s.messages.len(), 3);
         // An empty list turns the actions off.
         assert!(parse("actions = []", None).unwrap().actions.is_empty());
+    }
+
+    #[test]
+    fn plugins_add_providers_and_actions() {
+        let plugin = |text: &str| ("p.toml".to_string(), Ok(text.to_string()));
+        let config = "[[providers]]\nname = \"tasks\"\ncommand = \"mine\"\n\n[[workspaces]]\nname = \"W\"\nboard = { provider = \"extra\" }\n";
+        let plugins = [
+            plugin(
+                "[[providers]]\nname = \"tasks\"\ncommand = \"theirs\"\n\n[[providers]]\nname = \"extra\"\ncommand = \"x\"\n\n[[actions]]\nname = \"Index\"\nprompt = \"wiki {project}\"",
+            ),
+            ("bad.toml".to_string(), Ok("agents = []".to_string())),
+            ("big.toml".to_string(), Err("too large".to_string())),
+        ];
+        let s = parse_with_plugins(config, None, &plugins).unwrap();
+        // The plugin's provider is usable by a board; the config's wins.
+        let board = s.workspaces[0].board.as_ref().unwrap();
+        assert_eq!(board.provider.command, "x");
+        // Plugin actions replace the built-in ones.
+        assert_eq!(s.actions.len(), 1);
+        assert_eq!(s.actions[0].name, "Index");
+        // A plugin may not set anything else; errors are reported.
+        assert_eq!(s.messages.len(), 2);
+        assert!(s.messages[0].contains("bad.toml"));
+    }
+
+    #[test]
+    fn plugin_files_are_read_from_the_folder() {
+        let dir = std::env::temp_dir().join(format!("castorterm-plugins-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("b.toml"), "actions = []").unwrap();
+        std::fs::write(dir.join("a.toml"), "actions = []").unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+        let names: Vec<String> = read_plugins(&dir).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["a.toml", "b.toml"]);
+        assert!(read_plugins(&dir.join("missing")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
