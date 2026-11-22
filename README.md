@@ -71,6 +71,12 @@ agent = "Claude Code"            # optional
 prompt = "Index {project} ({repo}) at {path} into our wiki."
 ```
 
+Plugins: every `*.toml` in a `plugins` folder next to the config file may add
+`[[providers]]` and `[[actions]]` (nothing else). A team can ship its board
+provider and its own actions (for example indexing into its wiki) as one file
+without touching your config; a provider in your config wins over a plugin's
+of the same name.
+
 Agents report the files they read and edit through the same hooks as their
 status: a "N files" button bottom left of the session lists them (W written,
 E edited, R read), with the same preview on hover and opening on click. For
