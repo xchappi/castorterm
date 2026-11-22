@@ -6,3 +6,9 @@
   overridden by a team file.
 - **Replace, not merge, the defaults.** If anyone defines actions, castorterm's local defaults step
   aside: a company plugin offers "Index into the wiki" instead of also "Index locally".
+- **The user's `actions` decide alone.** If config.toml defines `actions` (even `[]`), plugins add
+  none; a plugin's empty list does not turn the built-in actions off.
+- **Hardened after review.** Plugin files are read with a byte limit (not just a size check); a
+  plugin provider that clashes with an existing one of a different command is reported (the same
+  command spelled with other slashes is not); links in `plugins/` are followed, as the folder belongs
+  to the same user as the config.
