@@ -308,10 +308,18 @@ pub fn parse(text: &str, home: Option<&Path>) -> Result<Settings, String> {
         for action in actions {
             let name = action.name.trim();
             let prompt = action.prompt.trim();
-            if name.is_empty() || prompt.is_empty() {
-                settings
-                    .messages
-                    .push("An action needs a name and a prompt: skipped".into());
+            if !valid_text(name) || !valid_text(prompt) {
+                settings.messages.push(
+                    "An action needs a name and a one-line prompt without control characters: skipped"
+                        .into(),
+                );
+                continue;
+            }
+            if prompt.chars().count() > crate::actions::MAX_PROMPT_CHARS {
+                settings.messages.push(format!(
+                    "Action '{name}' has a prompt longer than {} characters: skipped",
+                    crate::actions::MAX_PROMPT_CHARS
+                ));
                 continue;
             }
             if name.chars().count() > crate::actions::MAX_NAME_CHARS {
@@ -814,6 +822,15 @@ mod tests {
         assert_eq!(s.actions.len(), 1);
         assert_eq!(s.actions[0].agent.as_deref(), Some("Claude Code"));
         assert_eq!(s.messages.len(), 1);
+        // Line breaks, long names and long prompts are refused.
+        let bad = format!(
+            "[[actions]]\nname = \"A\"\nprompt = \"x\\ny\"\n\n[[actions]]\nname = \"{}\"\nprompt = \"x\"\n\n[[actions]]\nname = \"B\"\nprompt = \"{}\"",
+            "n".repeat(crate::actions::MAX_NAME_CHARS + 1),
+            "p".repeat(crate::actions::MAX_PROMPT_CHARS + 1)
+        );
+        let s = parse(&bad, None).unwrap();
+        assert!(s.actions.is_empty());
+        assert_eq!(s.messages.len(), 3);
         // An empty list turns the actions off.
         assert!(parse("actions = []", None).unwrap().actions.is_empty());
     }

@@ -45,11 +45,37 @@ pub fn defaults() -> Vec<ProjectAction> {
 
 /// The prompt of `action` for a project.
 pub fn render(template: &str, project: &str, path: &str, repo: Option<&str>) -> String {
-    template
-        .replace("{project}", project)
-        .replace("{path}", path)
-        .replace("{repo}", repo.unwrap_or(project))
+    // One pass: a value that contains `{path}` is not replaced again.
+    let mut out = String::with_capacity(template.len() + path.len());
+    let mut rest = template;
+    while let Some(start) = rest.find('{') {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let value = [
+            ("{project}", project),
+            ("{path}", path),
+            ("{repo}", repo.unwrap_or(project)),
+        ]
+        .into_iter()
+        .find(|(key, _)| tail.starts_with(key));
+        match value {
+            Some((key, value)) => {
+                out.push_str(value);
+                rest = &tail[key.len()..];
+            }
+            None => {
+                out.push('{');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    // Typed into a shell: no line breaks or other control characters.
+    crate::board::clean(&out)
 }
+
+/// Longest action prompt (the command line of an agent shim is limited).
+pub const MAX_PROMPT_CHARS: usize = 4000;
 
 /// The launcher that runs `action`: the named agent if it takes a prompt,
 /// otherwise the first agent that does. `None` when no agent can.
@@ -96,6 +122,13 @@ mod tests {
             "app at /p/app (me/app)"
         );
         assert_eq!(render("{repo}", "app", "/p", None), "app");
+        // No second pass, unknown braces kept, control characters gone.
+        assert_eq!(
+            render("{project}|{path}", "{path}", "/p", None),
+            "{path}|/p"
+        );
+        assert_eq!(render("{x} {", "a", "/p", None), "{x} {");
+        assert_eq!(render("a\n{project}", "b\rc", "/p", None), "a b c");
     }
 
     #[test]
@@ -111,6 +144,8 @@ mod tests {
         assert_eq!(pick_launcher(&action, &ls), Some(2));
         // A named agent that cannot take a prompt: none (no silent switch).
         action.agent = Some("OpenCode".into());
+        assert_eq!(pick_launcher(&action, &ls), None);
+        action.agent = Some("Missing".into());
         assert_eq!(pick_launcher(&action, &ls), None);
         action.agent = None;
         assert_eq!(pick_launcher(&action, &ls[..2]), None);

@@ -1117,6 +1117,12 @@ impl WorkspaceView {
             cx.notify();
             return;
         };
+        // Removed meanwhile (the palette can outlive a project).
+        if self.tree.workspace_of(project).is_none() {
+            return;
+        }
+        // Actions work on the project's checkout, not a task worktree: what
+        // they write (docs/project/) belongs to the project.
         let node = &self.tree.projects[project];
         let prompt = crate::actions::render(
             &action.prompt,
@@ -1517,7 +1523,17 @@ impl WorkspaceView {
                                     .pl_5()
                                     .pr_1()
                                     .pb_1()
-                                    .children(launchers)
+                                    .children(launchers),
+                            )
+                            // Actions on their own row, apart from new sessions.
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap_1()
+                                    .pl_5()
+                                    .pr_1()
+                                    .pb_1()
                                     .children(actions),
                             )
                         })
