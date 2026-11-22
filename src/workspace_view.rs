@@ -69,6 +69,8 @@ const BOARD_TICK: Duration = Duration::from_secs(5);
 pub(super) enum MiddleTab {
     Files,
     Quests,
+    /// The selected project's index (docs/project/ or README).
+    Project,
 }
 
 /// Board of one workspace, as last loaded.
@@ -107,6 +109,12 @@ pub struct WorkspaceView {
     files: FileTree,
     show_files: bool,
     middle_tab: MiddleTab,
+    /// Index of each project shown in the PROJECT tab, as last read.
+    /// Keyed by project index, which stays valid: removed projects keep
+    /// their slot in the tree.
+    project_indexes: HashMap<usize, crate::project_index::ProjectIndex>,
+    /// Latest index read requested per project: older results are dropped.
+    index_tickets: HashMap<usize, u64>,
     /// Boards by workspace index.
     boards: HashMap<usize, BoardState>,
     next_board_ticket: u64,
@@ -210,6 +218,10 @@ impl WorkspaceView {
                     .update(cx, |this, cx| {
                         this.refresh_board_if_due(cx);
                         this.refresh_branches(cx);
+                        // An agent may be writing the index: keep it fresh.
+                        if this.show_files && this.middle_tab == MiddleTab::Project {
+                            this.load_project_index(this.selected_project, cx);
+                        }
                     })
                     .is_err()
                 {
@@ -233,6 +245,8 @@ impl WorkspaceView {
             files: FileTree::default(),
             show_files: true,
             middle_tab: MiddleTab::Files,
+            project_indexes: HashMap::new(),
+            index_tickets: HashMap::new(),
             boards: HashMap::new(),
             next_board_ticket: 0,
             selected_task: None,
@@ -874,6 +888,9 @@ impl WorkspaceView {
         if changed && !self.files.is_expanded(&node.path) {
             self.expand_dir(node.path.clone(), cx);
         }
+        if changed && self.middle_tab == MiddleTab::Project {
+            self.load_project_index(project, cx);
+        }
         if changed {
             // Another workspace may now be on screen.
             self.refresh_board_if_due(cx);
@@ -926,7 +943,36 @@ impl WorkspaceView {
     fn show_tab(&mut self, tab: MiddleTab, cx: &mut Context<Self>) {
         self.middle_tab = tab;
         self.refresh_board_if_due(cx);
+        if tab == MiddleTab::Project {
+            self.load_project_index(self.selected_project, cx);
+        }
         cx.notify();
+    }
+
+    /// Reads the index of `project` on a background thread.
+    fn load_project_index(&mut self, project: usize, cx: &mut Context<Self>) {
+        let Some(node) = self.tree.projects.get(project) else {
+            return;
+        };
+        let root = node.path.clone();
+        let ticket = self.index_tickets.get(&project).copied().unwrap_or(0) + 1;
+        self.index_tickets.insert(project, ticket);
+        cx.spawn(async move |this, cx| {
+            let index = cx
+                .background_spawn(async move { crate::project_index::load(&root) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                // A newer read was asked for meanwhile: this one is stale.
+                if this.index_tickets.get(&project) != Some(&ticket) {
+                    return;
+                }
+                if this.project_indexes.get(&project) != Some(&index) {
+                    this.project_indexes.insert(project, index);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Reads the git branch of every listed project on a background thread
@@ -1741,7 +1787,6 @@ impl WorkspaceView {
             .workspaces
             .iter()
             .find(|w| w.projects.contains(&self.selected_project));
-        let quests = self.middle_tab == MiddleTab::Quests;
 
         let tab = |id: &'static str, text: &'static str, tab: MiddleTab| {
             let active = self.middle_tab == tab;
@@ -1773,7 +1818,8 @@ impl WorkspaceView {
                     .items_center()
                     .gap_1()
                     .child(tab("tab-files", "FILES", MiddleTab::Files))
-                    .child(tab("tab-quests", "QUESTS", MiddleTab::Quests)),
+                    .child(tab("tab-quests", "QUESTS", MiddleTab::Quests))
+                    .child(tab("tab-project", "PROJECT", MiddleTab::Project)),
             )
             .child(
                 div()
@@ -1795,6 +1841,9 @@ impl WorkspaceView {
                                     this.load_board(workspace, cx);
                                 }
                             }
+                            MiddleTab::Project => {
+                                this.load_project_index(this.selected_project, cx);
+                            }
                         }),
                     ),
             );
@@ -1809,10 +1858,10 @@ impl WorkspaceView {
                 .child(SharedString::from(label(&w.name)))
         });
 
-        let rows = if quests {
-            self.render_quest_rows(cx)
-        } else {
-            self.render_file_rows(cx)
+        let rows = match self.middle_tab {
+            MiddleTab::Quests => self.render_quest_rows(cx),
+            MiddleTab::Project => self.render_project_rows(cx),
+            MiddleTab::Files => self.render_file_rows(cx),
         };
 
         div()
@@ -1835,6 +1884,116 @@ impl WorkspaceView {
                     .overflow_y_scroll()
                     .children(rows),
             )
+    }
+
+    /// The PROJECT tab: the selected project's index (or README), when it
+    /// was written, and its actions.
+    fn render_project_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        use crate::project_index::{Block, Source};
+        let project = self.selected_project;
+        let Some(node) = self.tree.projects.get(project) else {
+            return Vec::new();
+        };
+        let mut rows: Vec<AnyElement> = Vec::new();
+        let index = self.project_indexes.get(&project);
+        let status = match index {
+            None => "Reading...".to_string(),
+            Some(i) => match (i.source, i.updated) {
+                (Source::Index, Some(when)) => format!(
+                    "Indexed {} \u{b7} {}",
+                    crate::project_index::ago(when, std::time::SystemTime::now()),
+                    crate::project_index::INDEX_DIR
+                ),
+                (Source::Index, None) => {
+                    format!("Indexed \u{b7} {}", crate::project_index::INDEX_DIR)
+                }
+                (Source::Readme, _) => "Not indexed yet: showing README.md".into(),
+                (Source::Nothing, _) => "Not indexed yet".into(),
+            },
+        };
+        rows.push(
+            div()
+                .px_3()
+                .pt_1()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(TEXT))
+                        .child(SharedString::from(node.name.clone())),
+                )
+                .child(
+                    div()
+                        .text_size(ui(SMALL_TEXT_SIZE))
+                        .text_color(rgb(MUTED))
+                        .child(SharedString::from(status)),
+                )
+                .child(div().flex().flex_wrap().gap_1().pt_1().children(
+                    self.actions.iter().enumerate().map(|(i, action)| {
+                        launcher_button(
+                            (SharedString::from(format!("project-action-{project}")), i),
+                            format!("\u{25C6} {}", action.name),
+                            ACCENT,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _: &ClickEvent, window, cx| {
+                                this.run_action(project, i, window, cx)
+                            },
+                        ))
+                    }),
+                ))
+                .into_any_element(),
+        );
+        let Some(index) = index else {
+            return rows;
+        };
+        for doc in &index.docs {
+            if index.source == Source::Index {
+                rows.push(
+                    div()
+                        .px_3()
+                        .pt_3()
+                        .text_size(ui(SMALL_TEXT_SIZE))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(WORKSPACE))
+                        .child(SharedString::from(doc.name.to_uppercase()))
+                        .into_any_element(),
+                );
+            }
+            for block in doc.blocks.iter().cloned() {
+                let row = div().px_3();
+                let row = match block {
+                    Block::Heading(level, text) => row
+                        .pt_1()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(if level <= 2 { TEXT } else { MUTED }))
+                        .child(SharedString::from(text)),
+                    Block::Bullet(marker, text) => row
+                        .flex()
+                        .gap_1()
+                        .text_color(rgb(TEXT))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(rgb(ACCENT))
+                                .child(SharedString::from(marker)),
+                        )
+                        .child(div().min_w(px(0.0)).child(SharedString::from(text))),
+                    Block::Code(text) => row
+                        .font_family(self.style.family.clone())
+                        .text_size(ui(SMALL_TEXT_SIZE))
+                        .text_color(rgb(MUTED))
+                        .bg(rgba(with_alpha(TEXT, 0x08)))
+                        .child(SharedString::from(text)),
+                    Block::Text(text) => row.text_color(rgb(TEXT)).child(SharedString::from(text)),
+                    Block::Gap => row.h(px(6.0)),
+                };
+                rows.push(row.text_size(ui(SMALL_TEXT_SIZE)).into_any_element());
+            }
+        }
+        rows
     }
 
     fn render_file_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
