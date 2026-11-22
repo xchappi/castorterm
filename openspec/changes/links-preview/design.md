@@ -15,3 +15,10 @@
   there. A right click with an image sends Ctrl+V instead of text.
 - **Floating, dismissable.** The preview sits bottom-right of the pane, follows the hovered link,
   closes on click; a pasted image stays 8 s.
+- **Hardened after review.** Nothing that could reach the network is touched: the drive must be a
+  local disk (`GetDriveTypeW`) and no component may be a symlink, junction or other reparse point,
+  checked from the root down off the UI thread; device names and alternate data streams are
+  refused. HTML and SVG left the allowlist (scripts). Images are size-checked from their header
+  (at most 16384 px per side and 40 Mpx) before decoding. Paths resolve against the project first,
+  and a reported directory is only used if it is a plain absolute path. The pasted-image timer is
+  separate from hover previews.

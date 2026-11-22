@@ -7,8 +7,9 @@ screenshots and pages an agent mentions are one gesture away, without ever runni
 
 ### Requirement: Preview linked files
 Resting the mouse on a file path in the output SHALL show a floating preview over the terminal: an
-excerpt around the given line for text files, or the image for image files. Network paths, folders,
-missing and binary files SHALL show no preview.
+excerpt around the given line for text files, or the image for image files. Network paths, mapped
+network drives, paths through links, folders, missing, binary and oversized files SHALL show no
+preview and SHALL NOT be accessed beyond what is needed to reject them.
 
 #### Scenario: Code location
 - **WHEN** the output contains `src/view.rs:120` and the mouse rests on it

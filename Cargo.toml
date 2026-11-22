@@ -15,6 +15,8 @@ alacritty_terminal = "0.26.0"
 anyhow = "1"
 futures = "0.3"
 gpui = "0.2.2"
+# Image size from the header only, before an image is shown (same version gpui uses).
+image = "0.25"
 polling = "3"
 raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }
@@ -23,6 +25,10 @@ toml = "0.8"
 toml_edit = "0.22"
 
 # Compile Metal shaders at runtime: avoids requiring the full Xcode Metal toolchain.
+[target.'cfg(windows)'.dependencies]
+# GetDriveTypeW: link previews never touch network drives.
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
