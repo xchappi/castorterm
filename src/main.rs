@@ -18,6 +18,7 @@ mod links;
 mod mouse;
 mod name_input;
 mod palette;
+mod project_index;
 mod provider;
 mod pty_tap;
 mod restore;

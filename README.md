@@ -71,6 +71,10 @@ agent = "Claude Code"            # optional
 prompt = "Index {project} ({repo}) at {path} into our wiki."
 ```
 
+The **PROJECT** tab (next to FILES and QUESTS) shows the selected project's
+index: the files in `docs/project/` rendered, with when they were last
+written and the project actions; a project not indexed yet shows its README.
+
 Plugins: every `*.toml` in a `plugins` folder next to the config file may add
 `[[providers]]` and `[[actions]]` (nothing else). A team can ship its board
 provider and its own actions (for example indexing into its wiki) as one file
