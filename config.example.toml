@@ -60,3 +60,12 @@ repo = "xchappi/castorterm"
 [[workspaces.projects]]
 name = "website"
 path = "~/src/website"
+
+# Project actions: buttons under the selected project that open an agent with
+# a prompt ({project}, {path}, {repo}). Without this section castorterm offers
+# "Index project" and "Suggest improvements", which write docs/project/ in the
+# repository. `actions = []` turns them off.
+# [[actions]]
+# name = "Index project"
+# agent = "Claude Code"
+# prompt = "Index the project {project} into docs/project/."

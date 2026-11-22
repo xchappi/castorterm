@@ -4,6 +4,7 @@
 // when launched from Explorer. Debug builds keep the console for logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod actions;
 mod agent_status;
 mod attention;
 mod board;

@@ -111,6 +111,19 @@ impl WorkspaceView {
                 action: Action::RenameSession(tab.id),
             });
         }
+        // Actions of the selected project.
+        if let Some(node) = self.tree.projects.get(self.selected_project) {
+            for (index, action) in self.actions.iter().enumerate() {
+                entries.push(Entry {
+                    title: action.name.clone(),
+                    detail: node.name.clone(),
+                    action: Action::RunOnProject {
+                        project: self.selected_project,
+                        action: index,
+                    },
+                });
+            }
+        }
         entries.push(Entry {
             title: "New workspace".into(),
             detail: String::new(),
@@ -246,6 +259,12 @@ impl WorkspaceView {
                 self.open_editor(EditTarget::RenameSession(id), window, cx);
             }
             Action::ToggleSplit => self.toggle_split(window, cx),
+            Action::RunOnProject { project, action } => {
+                // The project may have been removed since the palette opened.
+                if self.tree.workspace_of(project).is_some() {
+                    self.run_action(project, action, window, cx);
+                }
+            }
             Action::Find => self.open_search(window, cx),
             Action::ShowFiles => {
                 self.show_files = true;
