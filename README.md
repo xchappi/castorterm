@@ -56,6 +56,13 @@ Build your workspaces from the window, no config editing needed:
 
 Every change is saved to your config file, keeping your comments.
 
+The mouse works in the terminal: drag to select text (double click: word,
+triple: line), right click to copy the selection or paste. Programs that read
+the mouse (OpenCode, vim, htop, lazygit) get clicks, drags and the wheel; hold
+Shift to select text in them instead. Menus of programs that do not read the
+mouse, like Claude Code's prompts, are clickable too: a click moves the `❯`
+marker to that option, a click on the marked option chooses it.
+
 Double-click a tab or a session row (or use **Rename session** in the
 palette) to name it; the name is kept when castorterm reopens your sessions.
 Drag a tab onto another to reorder.
@@ -129,6 +136,7 @@ other agent can do the same from its own hooks or scripts.
 | `Ctrl+Shift+O` | Add folders to the selected workspace |
 | `Ctrl+Shift+P` | Command palette: open any agent in any project, go to a session, add folders |
 | `Ctrl+Shift+J` | Jump to the next agent waiting for you |
+| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy the selection / paste (`Ctrl+C` copies while text is selected) |
 | `Ctrl+Shift+F` | Find in the active session's history (Enter older, Shift+Enter newer) |
 | `Shift+PageUp` / `PageDown`, wheel | Scroll the history |
 | `Ctrl+Shift+D` | Split: the active session next to the previous one (again to unsplit) |
