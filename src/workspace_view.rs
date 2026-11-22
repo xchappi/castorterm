@@ -1092,7 +1092,12 @@ impl WorkspaceView {
                 .background_spawn(async move {
                     // The built-in board reads the projects; no command runs.
                     if crate::local_tasks::is_local(&config) {
-                        return Ok(crate::local_tasks::list(&local_projects));
+                        // Never block the board on a network drive.
+                        let local: Vec<(String, PathBuf)> = local_projects
+                            .into_iter()
+                            .filter(|(_, path)| crate::git_remote::on_fixed_drive(path))
+                            .collect();
+                        return Ok(crate::local_tasks::list(&local));
                     }
                     let path_var = std::env::var_os("PATH");
                     let program = provider::resolve(
@@ -2120,7 +2125,11 @@ impl WorkspaceView {
         let state = self.boards.get(&workspace);
         if state.is_none_or(|s| s.loading) {
             rows.push(note(
-                format!("Loading from {}…", config.provider.name),
+                if crate::local_tasks::is_local(config) {
+                    "Reading TASKS.md and OpenSpec changes…".to_string()
+                } else {
+                    format!("Loading from {}…", config.provider.name)
+                },
                 MUTED,
             ));
         }

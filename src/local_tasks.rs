@@ -8,7 +8,7 @@
 //! - OpenSpec changes in progress (`openspec/changes/<id>/tasks.md`): one
 //!   task per change, with how many of its steps are done.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::board::{Listing, Status, Task};
 use crate::config::{Board, Provider};
@@ -43,16 +43,28 @@ pub fn is_local(board: &Board) -> bool {
 }
 
 /// The local tasks of `projects` (`(name, root)`), read off the UI thread.
-pub fn list(projects: &[(String, std::path::PathBuf)]) -> Listing {
+/// Linked git worktrees (a `.git` file, as for task worktrees) are skipped:
+/// they hold the same files as their project. Most pressing tasks first
+/// when there are too many.
+pub fn list(projects: &[(String, PathBuf)]) -> Listing {
     let mut tasks = Vec::new();
     for (name, root) in projects {
+        if root.join(".git").is_file() {
+            continue;
+        }
         if let Some(text) = read_plain(&root.join("TASKS.md")) {
             tasks.extend(from_tasks_md(&text, name));
         }
         tasks.extend(openspec_changes(root, name));
     }
+    let mut seen = std::collections::HashSet::new();
+    tasks.retain(|t| seen.insert(t.id.clone()));
     let omitted = tasks.len().saturating_sub(crate::board::MAX_TASKS);
-    tasks.truncate(crate::board::MAX_TASKS);
+    if omitted > 0 {
+        // Stable: within a status, file order is kept.
+        tasks.sort_by_key(|t| Status::ALL.iter().position(|s| *s == t.status));
+        tasks.truncate(crate::board::MAX_TASKS);
+    }
     Listing {
         tasks,
         skipped: 0,
@@ -60,56 +72,125 @@ pub fn list(projects: &[(String, std::path::PathBuf)]) -> Listing {
     }
 }
 
-/// Status of a `TASKS.md` section heading, if it names one.
+/// Status of a `TASKS.md` section heading, if one of its words names one.
+/// Earlier rows win when a heading names several ("Review / Done").
 fn section_status(heading: &str) -> Option<Status> {
-    let h = heading.trim().to_lowercase();
-    let has = |words: &[&str]| words.iter().any(|w| h.contains(w));
-    if has(&["progress", "doing", "curso", "wip"]) {
+    let lower = heading.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let has = |names: &[&str]| words.iter().any(|w| names.contains(w));
+    let phrase = |p: &str| lower.contains(p);
+    if phrase("in progress") || phrase("en curso") || has(&["doing", "wip", "progress", "ongoing"])
+    {
         Some(Status::InProgress)
-    } else if has(&["review", "revision", "revisión"]) {
+    } else if has(&["review", "revision", "revisión", "reviewing"]) {
         Some(Status::Review)
-    } else if has(&["backlog", "later", "someday", "ideas", "pendiente"]) {
-        Some(Status::Backlog)
-    } else if has(&["done", "hecho", "completed", "terminad"]) {
+    } else if has(&[
+        "done",
+        "hecho",
+        "hechas",
+        "hechos",
+        "completed",
+        "completado",
+        "completadas",
+        "terminado",
+        "terminadas",
+        "finished",
+    ]) {
         Some(Status::Done)
-    } else if has(&["todo", "to do", "ready", "next", "tareas", "tasks"]) {
+    } else if has(&["backlog", "later", "someday", "ideas", "futuro", "future"]) {
+        Some(Status::Backlog)
+    } else if phrase("to do")
+        || has(&[
+            "todo",
+            "ready",
+            "next",
+            "pendiente",
+            "pendientes",
+            "tareas",
+            "tasks",
+        ])
+    {
         Some(Status::Ready)
     } else {
         None
     }
 }
 
-/// Tasks of a `TASKS.md`: each checklist item, its status from the
-/// enclosing section (ready by default), done when checked. The id is the
-/// file and line, so a prompt can point the agent to it.
-pub fn from_tasks_md(text: &str, project: &str) -> Vec<Task> {
+/// `## Heading` → (level, text); `#tag` is not a heading.
+fn heading(line: &str) -> Option<(usize, &str)> {
+    let level = line.chars().take_while(|&c| c == '#').count();
+    let rest = &line[level..];
+    ((1..=6).contains(&level) && rest.starts_with(' ')).then(|| (level, rest.trim()))
+}
+
+/// A checklist item: (checked, title).
+fn checkbox(line: &str) -> Option<(bool, &str)> {
+    let t = line.trim_start();
+    let item = t
+        .strip_prefix("- ")
+        .or_else(|| t.strip_prefix("* "))
+        .or_else(|| t.strip_prefix("+ "))?;
+    match item.get(..3)? {
+        "[ ]" => Some((false, &item[3..])),
+        "[x]" | "[X]" => Some((true, &item[3..])),
+        _ => None,
+    }
+}
+
+/// Lines outside code fences (``` and ~~~), with their 1-based number.
+fn prose_lines(text: &str) -> impl Iterator<Item = &str> {
     let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
-    let mut section = Status::Ready;
-    let mut tasks = Vec::new();
-    for (index, line) in text.lines().enumerate() {
+    let mut in_code = false;
+    text.lines().filter(move |line| {
+        let t = line.trim_start();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            in_code = !in_code;
+            return false;
+        }
+        !in_code
+    })
+}
+
+/// Tasks of a `TASKS.md`: each checklist item, its status from the
+/// enclosing section (ready by default; a sub-heading that names no status
+/// keeps its parent's), done when checked. The id is the project and a
+/// hash of the title, so it survives edits elsewhere in the file.
+pub fn from_tasks_md(text: &str, project: &str) -> Vec<Task> {
+    // Stack of (heading level, status it sets).
+    let mut sections: Vec<(usize, Status)> = Vec::new();
+    let mut tasks: Vec<Task> = Vec::new();
+    for line in prose_lines(text) {
         let t = line.trim();
-        if let Some(heading) = t.strip_prefix('#') {
-            section = section_status(heading.trim_start_matches('#')).unwrap_or(Status::Ready);
+        if let Some((level, text)) = heading(t) {
+            while sections.last().is_some_and(|(l, _)| *l >= level) {
+                sections.pop();
+            }
+            let inherited = sections.last().map(|(_, s)| *s);
+            let status = section_status(text).or(inherited).unwrap_or(Status::Ready);
+            sections.push((level, status));
             continue;
         }
-        let Some(item) = t
-            .strip_prefix("- ")
-            .or_else(|| t.strip_prefix("* "))
-            .or_else(|| t.strip_prefix("+ "))
-        else {
+        let Some((checked, title)) = checkbox(line) else {
             continue;
-        };
-        let (checked, title) = match item.get(..3) {
-            Some("[ ]") => (false, &item[3..]),
-            Some("[x]") | Some("[X]") => (true, &item[3..]),
-            _ => continue,
         };
         let title = clean_title(title);
         if title.is_empty() {
             continue;
         }
+        let section = sections.last().map_or(Status::Ready, |(_, s)| *s);
+        let base = format!("{project}/TASKS.md#{:08x}", fnv(&title.to_lowercase()));
+        // The same title twice: number the repeats.
+        let repeats = tasks.iter().filter(|t| t.id.starts_with(&base)).count();
+        let id = if repeats == 0 {
+            base
+        } else {
+            format!("{base}-{}", repeats + 1)
+        };
         tasks.push(Task {
-            id: format!("{project}/TASKS.md:{}", index + 1),
+            id,
             title,
             status: if checked { Status::Done } else { section },
             priority: None,
@@ -123,9 +204,7 @@ pub fn from_tasks_md(text: &str, project: &str) -> Vec<Task> {
 /// One task per OpenSpec change in progress, with its progress.
 fn openspec_changes(root: &Path, project: &str) -> Vec<Task> {
     let dir = root.join("openspec").join("changes");
-    let plain =
-        std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir() && !crate::links::is_link(&m));
-    if !plain {
+    if !plain_dir(&dir) {
         return Vec::new();
     }
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -133,12 +212,12 @@ fn openspec_changes(root: &Path, project: &str) -> Vec<Task> {
     };
     let mut changes: Vec<String> = entries
         .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter(|e| plain_dir(&e.path()))
         .filter_map(|e| e.file_name().to_str().map(String::from))
         .filter(|name| name != "archive")
-        .take(MAX_CHANGES)
         .collect();
     changes.sort();
+    changes.truncate(MAX_CHANGES);
     changes
         .into_iter()
         .filter_map(|change| {
@@ -151,16 +230,11 @@ fn openspec_changes(root: &Path, project: &str) -> Vec<Task> {
 /// The task of OpenSpec change `id` from its `tasks.md`.
 pub fn change_task(id: &str, tasks_md: &str, project: &str) -> Task {
     let (mut done, mut total) = (0, 0);
-    for line in tasks_md.lines() {
-        let t = line.trim_start();
-        if let Some(item) = t.strip_prefix("- ") {
-            match item.get(..3) {
-                Some("[ ]") => total += 1,
-                Some("[x]") | Some("[X]") => {
-                    total += 1;
-                    done += 1;
-                }
-                _ => {}
+    for line in prose_lines(tasks_md) {
+        if let Some((checked, _)) = checkbox(line) {
+            total += 1;
+            if checked {
+                done += 1;
             }
         }
     }
@@ -171,8 +245,9 @@ pub fn change_task(id: &str, tasks_md: &str, project: &str) -> Task {
     } else {
         Status::Ready
     };
+    let id = crate::board::clean(id);
     Task {
-        id: format!("openspec:{id}"),
+        id: format!("openspec:{project}:{id}"),
         title: clean_title(&format!("OpenSpec change {id} ({done}/{total} tasks done)")),
         status,
         priority: None,
@@ -183,7 +258,22 @@ pub fn change_task(id: &str, tasks_md: &str, project: &str) -> Task {
 
 fn clean_title(title: &str) -> String {
     let clean = crate::board::clean(title.trim());
-    clean.chars().take(MAX_TITLE_CHARS).collect()
+    match clean.char_indices().nth(MAX_TITLE_CHARS) {
+        Some((cut, _)) => format!("{}\u{2026}", &clean[..cut]),
+        None => clean,
+    }
+}
+
+/// 32-bit FNV-1a: a short, stable id part.
+fn fnv(text: &str) -> u32 {
+    text.bytes().fold(0x811c_9dc5, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    })
+}
+
+/// A folder that is not a link (symlink or junction).
+fn plain_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() && !crate::links::is_link(&m))
 }
 
 /// Text of a plain file (not a link), bounded.
@@ -206,51 +296,103 @@ fn read_plain(path: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn statuses(md: &str) -> Vec<(String, Status)> {
+        from_tasks_md(md, "app")
+            .into_iter()
+            .map(|t| (t.title, t.status))
+            .collect()
+    }
+
     #[test]
     fn tasks_md_sections_and_checks() {
         let md = "# Tasks\n- [ ] write docs\n- not a task\n\n## In progress\n- [ ] add login\n- [x] set up CI\n\n## Backlog\n* [ ] dark mode\n\n## Done\n- [x] init repo\n- [ ]   \n";
-        let tasks = from_tasks_md(md, "app");
-        let got: Vec<(&str, Status, &str)> = tasks
-            .iter()
-            .map(|t| (t.title.as_str(), t.status, t.id.as_str()))
-            .collect();
         assert_eq!(
-            got,
+            statuses(md),
             vec![
-                ("write docs", Status::Ready, "app/TASKS.md:2"),
-                ("add login", Status::InProgress, "app/TASKS.md:6"),
-                ("set up CI", Status::Done, "app/TASKS.md:7"),
-                ("dark mode", Status::Backlog, "app/TASKS.md:10"),
-                ("init repo", Status::Done, "app/TASKS.md:13"),
+                ("write docs".into(), Status::Ready),
+                ("add login".into(), Status::InProgress),
+                ("set up CI".into(), Status::Done),
+                ("dark mode".into(), Status::Backlog),
+                ("init repo".into(), Status::Done),
             ]
         );
+        let tasks = from_tasks_md(md, "app");
         assert!(tasks.iter().all(|t| t.project.as_deref() == Some("app")));
+        assert!(tasks[0].id.starts_with("app/TASKS.md#"));
         // Control characters never reach a title (it goes into a prompt).
         assert_eq!(from_tasks_md("- [ ] a\u{1b}[31mb", "p")[0].title, "a [31mb");
+        // Long titles are cut with a mark.
+        let long = from_tasks_md(&format!("- [ ] {}", "x".repeat(300)), "p");
+        assert!(long[0].title.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn sub_headings_fences_and_words() {
+        let md = "## In progress\n### Auth\n- [ ] login\n```\n# build\n- [ ] not a task\n```\n- [ ] logout\n## Preview builds\n- [ ] a\n## Abandoned\n- [ ] b\n## Tareas pendientes\n- [ ] c\n#tag\n- [ ] d\n";
+        assert_eq!(
+            statuses(md),
+            vec![
+                ("login".into(), Status::InProgress),
+                ("logout".into(), Status::InProgress),
+                ("a".into(), Status::Ready),
+                ("b".into(), Status::Ready),
+                ("c".into(), Status::Ready),
+                ("d".into(), Status::Ready),
+            ]
+        );
+        assert_eq!(
+            statuses("\u{FEFF}## Done\r\n- [ ] x\r\n")[0].1,
+            Status::Done
+        );
+    }
+
+    #[test]
+    fn ids_survive_edits() {
+        let before = from_tasks_md("- [ ] one\n- [ ] two", "app");
+        let after = from_tasks_md("- [ ] new first\n\n- [ ] two\n- [ ] one", "app");
+        let id =
+            |list: &[Task], title: &str| list.iter().find(|t| t.title == title).unwrap().id.clone();
+        assert_eq!(id(&before, "one"), id(&after, "one"));
+        assert_eq!(id(&before, "two"), id(&after, "two"));
+        // Repeated titles get distinct ids.
+        let twice = from_tasks_md("- [ ] same\n- [ ] same", "app");
+        assert_ne!(twice[0].id, twice[1].id);
     }
 
     #[test]
     fn openspec_progress() {
-        let t = change_task("add-x", "## 1\n- [x] a\n  - [ ] b\n- [ ] c", "app");
+        let t = change_task("add-x", "## 1\n- [x] a\n  - [ ] b\n* [ ] c", "app");
         assert_eq!(t.status, Status::InProgress);
         assert_eq!(t.title, "OpenSpec change add-x (1/3 tasks done)");
-        assert_eq!(change_task("y", "- [x] a", "app").status, Status::Review);
+        assert_eq!(t.id, "openspec:app:add-x");
+        assert_eq!(
+            change_task("y", "\u{FEFF}- [x] a", "app").status,
+            Status::Review
+        );
         assert_eq!(change_task("z", "nothing", "app").status, Status::Ready);
     }
 
     #[test]
     fn listing_from_projects() {
-        let root = std::env::temp_dir().join(format!("castorterm-local-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let base = std::env::temp_dir().join(format!("castorterm-local-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("app");
         let change = root.join("openspec").join("changes").join("feat-a");
         std::fs::create_dir_all(&change).unwrap();
         std::fs::create_dir_all(root.join("openspec/changes/archive/old")).unwrap();
         std::fs::write(change.join("tasks.md"), "- [ ] one").unwrap();
         std::fs::write(root.join("TASKS.md"), "- [ ] fix bug").unwrap();
-        let listing = list(&[("app".into(), root.clone())]);
+        // A linked worktree of the same project: skipped.
+        let worktree = base.join("app@task");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: x").unwrap();
+        std::fs::write(worktree.join("TASKS.md"), "- [ ] fix bug").unwrap();
+        let listing = list(&[("app".into(), root.clone()), ("app@task".into(), worktree)]);
         let ids: Vec<&str> = listing.tasks.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(ids, ["app/TASKS.md:1", "openspec:feat-a"]);
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        assert!(ids[0].starts_with("app/TASKS.md#"));
+        assert_eq!(ids[1], "openspec:app:feat-a");
         assert!(is_local(&board()));
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
