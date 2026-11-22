@@ -110,7 +110,11 @@ pub struct WorkspaceView {
     show_files: bool,
     middle_tab: MiddleTab,
     /// Index of each project shown in the PROJECT tab, as last read.
+    /// Keyed by project index, which stays valid: removed projects keep
+    /// their slot in the tree.
     project_indexes: HashMap<usize, crate::project_index::ProjectIndex>,
+    /// Latest index read requested per project: older results are dropped.
+    index_tickets: HashMap<usize, u64>,
     /// Boards by workspace index.
     boards: HashMap<usize, BoardState>,
     next_board_ticket: u64,
@@ -214,6 +218,10 @@ impl WorkspaceView {
                     .update(cx, |this, cx| {
                         this.refresh_board_if_due(cx);
                         this.refresh_branches(cx);
+                        // An agent may be writing the index: keep it fresh.
+                        if this.show_files && this.middle_tab == MiddleTab::Project {
+                            this.load_project_index(this.selected_project, cx);
+                        }
                     })
                     .is_err()
                 {
@@ -238,6 +246,7 @@ impl WorkspaceView {
             show_files: true,
             middle_tab: MiddleTab::Files,
             project_indexes: HashMap::new(),
+            index_tickets: HashMap::new(),
             boards: HashMap::new(),
             next_board_ticket: 0,
             selected_task: None,
@@ -946,13 +955,21 @@ impl WorkspaceView {
             return;
         };
         let root = node.path.clone();
+        let ticket = self.index_tickets.get(&project).copied().unwrap_or(0) + 1;
+        self.index_tickets.insert(project, ticket);
         cx.spawn(async move |this, cx| {
             let index = cx
                 .background_spawn(async move { crate::project_index::load(&root) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.project_indexes.insert(project, index);
-                cx.notify();
+                // A newer read was asked for meanwhile: this one is stale.
+                if this.index_tickets.get(&project) != Some(&ticket) {
+                    return;
+                }
+                if this.project_indexes.get(&project) != Some(&index) {
+                    this.project_indexes.insert(project, index);
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -1945,7 +1962,7 @@ impl WorkspaceView {
                         .into_any_element(),
                 );
             }
-            for block in crate::project_index::parse(&doc.text) {
+            for block in doc.blocks.iter().cloned() {
                 let row = div().px_3();
                 let row = match block {
                     Block::Heading(level, text) => row
@@ -1953,11 +1970,16 @@ impl WorkspaceView {
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(if level <= 2 { TEXT } else { MUTED }))
                         .child(SharedString::from(text)),
-                    Block::Bullet(text) => row
+                    Block::Bullet(marker, text) => row
                         .flex()
                         .gap_1()
                         .text_color(rgb(TEXT))
-                        .child(div().flex_none().text_color(rgb(ACCENT)).child("\u{2022}"))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(rgb(ACCENT))
+                                .child(SharedString::from(marker)),
+                        )
                         .child(div().min_w(px(0.0)).child(SharedString::from(text))),
                     Block::Code(text) => row
                         .font_family(self.style.family.clone())

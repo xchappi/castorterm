@@ -8,3 +8,8 @@
   images or links: it is a summary view, the files stay the source.
 - **README as fallback.** A project that was never indexed still shows something useful and the
   buttons to index it.
+- **Hardened after review.** Markdown is parsed once, off the UI thread, and kept as blocks (at most
+  600 per file, with a note when a file is cut); overlapping reads keep only the newest; a
+  `docs/project` that is a link is not followed; ordered lists, task items with links, a BOM, `~~~`
+  fences and table rows are handled; while the tab is open the index is re-read with the board timer,
+  so an agent's indexing shows up without Refresh.
