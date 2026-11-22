@@ -71,6 +71,13 @@ agent = "Claude Code"            # optional
 prompt = "Index {project} ({repo}) at {path} into our wiki."
 ```
 
+A workspace without a configured board gets a local one, with nothing to set
+up: the QUESTS tab lists the checklist items of each project's `TASKS.md`
+(`- [ ] task`, `- [x] done`; sections such as `## In progress`, `## Review`,
+`## Backlog` or `## Done` set the status) and every OpenSpec change in
+progress, with how many of its tasks are done. Starting a task opens an
+agent with it, as with any board.
+
 The **PROJECT** tab (next to FILES and QUESTS) shows the selected project's
 index: the files in `docs/project/` rendered, with when they were last
 written and the project actions; a project not indexed yet shows its README.

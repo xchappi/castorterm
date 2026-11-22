@@ -15,6 +15,7 @@ mod files;
 mod git_remote;
 mod keys;
 mod links;
+mod local_tasks;
 mod mouse;
 mod name_input;
 mod palette;

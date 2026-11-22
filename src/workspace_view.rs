@@ -949,6 +949,13 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// The board of `workspace`: its configured one, or the built-in local
+    /// board (TASKS.md and OpenSpec changes of its projects).
+    fn board_of(&self, workspace: usize) -> Option<crate::config::Board> {
+        let node = self.tree.workspaces.get(workspace)?;
+        Some(node.board.clone().unwrap_or_else(crate::local_tasks::board))
+    }
+
     /// Reads the index of `project` on a background thread.
     fn load_project_index(&mut self, project: usize, cx: &mut Context<Self>) {
         let Some(node) = self.tree.projects.get(project) else {
@@ -1034,7 +1041,7 @@ impl WorkspaceView {
         let Some(workspace) = self.selected_workspace() else {
             return;
         };
-        let Some(config) = self.tree.workspaces[workspace].board.as_ref() else {
+        let Some(config) = self.board_of(workspace) else {
             return;
         };
         let every = Duration::from_secs(config.refresh_secs);
@@ -1051,9 +1058,19 @@ impl WorkspaceView {
         let Some(node) = self.tree.workspaces.get(workspace) else {
             return;
         };
-        let Some(config) = node.board.clone() else {
+        let Some(config) = self.board_of(workspace) else {
             return;
         };
+        let local_projects: Vec<(String, PathBuf)> = node
+            .projects
+            .iter()
+            .map(|&p| {
+                (
+                    self.tree.projects[p].name.clone(),
+                    self.tree.projects[p].path.clone(),
+                )
+            })
+            .collect();
         let repos = board::workspace_repos(
             node.projects
                 .iter()
@@ -1073,6 +1090,15 @@ impl WorkspaceView {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
+                    // The built-in board reads the projects; no command runs.
+                    if crate::local_tasks::is_local(&config) {
+                        // Never block the board on a network drive.
+                        let local: Vec<(String, PathBuf)> = local_projects
+                            .into_iter()
+                            .filter(|(_, path)| crate::git_remote::on_fixed_drive(path))
+                            .collect();
+                        return Ok(crate::local_tasks::list(&local));
+                    }
                     let path_var = std::env::var_os("PATH");
                     let program = provider::resolve(
                         &config.provider.command,
@@ -1119,7 +1145,7 @@ impl WorkspaceView {
             return;
         };
         let node = &self.tree.workspaces[workspace];
-        let Some(config) = node.board.as_ref() else {
+        let Some(config) = self.board_of(workspace) else {
             return;
         };
         let Some(agent) = self.launchers.get(launcher) else {
@@ -2091,17 +2117,19 @@ impl WorkspaceView {
         let Some(workspace) = self.selected_workspace() else {
             return Vec::new();
         };
-        let Some(config) = self.tree.workspaces[workspace].board.as_ref() else {
-            return vec![note(
-                "No board for this workspace. Add a provider and a board to it in config.toml (see docs/providers.md).".into(),
-                MUTED,
-            )];
+        let Some(config) = self.board_of(workspace) else {
+            return Vec::new();
         };
+        let config = &config;
         let mut rows = Vec::new();
         let state = self.boards.get(&workspace);
         if state.is_none_or(|s| s.loading) {
             rows.push(note(
-                format!("Loading from {}…", config.provider.name),
+                if crate::local_tasks::is_local(config) {
+                    "Reading TASKS.md and OpenSpec changes…".to_string()
+                } else {
+                    format!("Loading from {}…", config.provider.name)
+                },
                 MUTED,
             ));
         }
@@ -2133,7 +2161,12 @@ impl WorkspaceView {
             ));
         }
         if listing.tasks.is_empty() {
-            rows.push(note("No tasks.".into(), MUTED));
+            let hint = if crate::local_tasks::is_local(config) {
+                "No tasks yet. This board reads TASKS.md (\"- [ ] task\" items, sections such as \"## In progress\") and OpenSpec changes in the workspace's projects; or set a provider in config.toml."
+            } else {
+                "No tasks."
+            };
+            rows.push(note(hint.into(), MUTED));
         }
 
         for (status, tasks) in board::group(&listing.tasks) {
@@ -2324,9 +2357,8 @@ impl WorkspaceView {
         let has_buttons = !buttons.is_empty();
         // Show exactly what an agent will receive before it is started: the
         // title comes from the tracker and is untrusted input for the agent.
-        let prompt = node
-            .board
-            .as_ref()
+        let prompt = self
+            .board_of(workspace)
             .map(|config| board::final_prompt(&config.prompt, task, cfg!(windows)));
         div()
             .flex()
