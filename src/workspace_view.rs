@@ -783,6 +783,7 @@ impl WorkspaceView {
             .bg(theme_bg())
             .when(active, |d| d.shadow(glow(color, 0x33, 18.0)))
             // A click in a pane makes it the active session.
+            .relative()
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, _, window, cx| {
@@ -792,6 +793,7 @@ impl WorkspaceView {
                 }),
             )
             .child(tab.handle.view.clone())
+            .children(self.render_search_bar(id))
     }
 
     /// Gives keyboard focus to the active terminal and updates the title.
@@ -2498,15 +2500,7 @@ impl Render for WorkspaceView {
                             .flex_col()
                             .bg(rgb(HUD_BG))
                             .child(self.render_tab_bar(cx))
-                            .child(
-                                div()
-                                    .relative()
-                                    .flex_1()
-                                    .min_h(px(0.0))
-                                    .w_full()
-                                    .child(terminal)
-                                    .children(self.render_search_bar()),
-                            ),
+                            .child(div().flex_1().min_h(px(0.0)).w_full().child(terminal)),
                     ),
             )
             .children(self.render_palette(cx))

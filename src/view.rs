@@ -5,7 +5,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use alacritty_terminal::grid::{Dimensions as _, Scroll};
-use alacritty_terminal::index::{Boundary, Column, Direction, Point as GridPoint, Side};
+use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point as GridPoint, Side};
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::search::{Match, RegexSearch};
@@ -33,6 +33,8 @@ const FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT: f32 = 1.3;
 /// Pixels of wheel movement per scrolled line.
 const WHEEL_LINE_PX: f32 = 18.0;
+/// Most lines scrolled by one wheel event.
+const MAX_WHEEL_LINES: f32 = 1000.0;
 /// Background of the search match.
 const SEARCH_MATCH: Rgb8 = Rgb8 {
     r: 0xff,
@@ -105,6 +107,20 @@ struct Search {
     query: String,
     regex: RegexSearch,
     current: Option<Match>,
+    /// Text of `current` and the history size when it was found, to follow
+    /// it as new output pushes lines into the history.
+    text: String,
+    history: usize,
+}
+
+impl Search {
+    /// Moves `current` to where its text is now, or drops it.
+    fn relocate<T>(&mut self, term: &alacritty_terminal::Term<T>) {
+        if let Some(m) = &self.current {
+            self.current = relocate(term, m, &self.text, self.history);
+            self.history = term.history_size();
+        }
+    }
 }
 
 /// Outcome of [`TerminalView::find`].
@@ -114,6 +130,45 @@ pub enum FindResult {
     NotFound,
     /// The query could not be searched (too long or empty).
     Invalid,
+    /// A full-screen program (vim, less) is showing: it has no history.
+    FullScreen,
+}
+
+/// Where match `m`, found when the history had `history_then` lines, is
+/// now: lines pushed into the history since move it up. `None` when its
+/// text `text` is no longer there (cleared, reflowed, rotated out).
+pub fn relocate<T>(
+    term: &alacritty_terminal::Term<T>,
+    m: &Match,
+    text: &str,
+    history_then: usize,
+) -> Option<Match> {
+    let grown = term.history_size().saturating_sub(history_then) as i32;
+    let shift = |p: &GridPoint| GridPoint::new(Line(p.line.0 - grown), p.column);
+    let (start, end) = (shift(m.start()), shift(m.end()));
+    let inside = |p: GridPoint| {
+        p.line >= term.topmost_line()
+            && p.line <= term.bottommost_line()
+            && p.column <= term.last_column()
+    };
+    if !inside(start) || !inside(end) || start > end {
+        return None;
+    }
+    (term.bounds_to_string(start, end) == text).then_some(start..=end)
+}
+
+/// Whole lines to scroll for a wheel movement of `pixels` plus what was
+/// left over (`carry`), and the new leftover. Bounded: Windows' "one screen
+/// at a time" setting reports billions of lines per notch.
+pub fn wheel_lines(carry: f32, pixels: f32) -> (i32, f32) {
+    let lines = carry + pixels / WHEEL_LINE_PX;
+    let whole = lines.trunc();
+    let rest = if whole.abs() > MAX_WHEEL_LINES {
+        0.0
+    } else {
+        lines - whole
+    };
+    (whole.clamp(-MAX_WHEEL_LINES, MAX_WHEEL_LINES) as i32, rest)
 }
 
 /// The match after `current` (older when `backwards`), or the nearest one
@@ -222,6 +277,10 @@ impl TerminalView {
             self.clear_search(cx);
             return FindResult::Invalid;
         }
+        if self.alt_screen() {
+            self.clear_search(cx);
+            return FindResult::FullScreen;
+        }
         if self.search.as_ref().is_none_or(|s| s.query != query) {
             let Ok(regex) = RegexSearch::new(&literal_pattern(query)) else {
                 self.clear_search(cx);
@@ -231,13 +290,18 @@ impl TerminalView {
                 query: query.to_string(),
                 regex,
                 current: None,
+                text: String::new(),
+                history: 0,
             });
         }
         let search = self.search.as_mut().expect("set above");
         let mut term = self.session.term().lock();
+        search.relocate(&term);
         let found = next_match(&term, &mut search.regex, search.current.as_ref(), backwards);
         if let Some(m) = &found {
             term.scroll_to_point(*m.start());
+            search.text = term.bounds_to_string(*m.start(), *m.end());
+            search.history = term.history_size();
         }
         drop(term);
         let result = if found.is_some() {
@@ -292,11 +356,10 @@ impl TerminalView {
         if matches!(event.touch_phase, gpui::TouchPhase::Started) {
             self.wheel_lines = 0.0;
         }
-        let line = px(WHEEL_LINE_PX);
-        let lines = self.wheel_lines + f32::from(event.delta.pixel_delta(line).y) / WHEEL_LINE_PX;
-        let whole = lines.trunc();
-        self.wheel_lines = lines - whole;
-        self.scroll_lines(whole as i32, cx);
+        let pixels = f32::from(event.delta.pixel_delta(px(WHEEL_LINE_PX)).y);
+        let (whole, rest) = wheel_lines(self.wheel_lines, pixels);
+        self.wheel_lines = rest;
+        self.scroll_lines(whole, cx);
     }
 
     /// Back to the live screen when the user types.
@@ -368,7 +431,11 @@ impl Render for TerminalView {
         let scanlines = style.scanlines;
         let focus_handle = self.focus_handle.clone();
         let entity = cx.entity();
-        let highlight = self.search.as_ref().and_then(|s| s.current.clone());
+        // Follow the match as output scrolls it; drop it if it is gone.
+        let highlight = self.search.as_mut().and_then(|search| {
+            search.relocate(&session.term().lock());
+            search.current.clone()
+        });
 
         div()
             .size_full()
@@ -691,10 +758,31 @@ mod tests {
         assert_eq!(literal_pattern("Error"), "Error");
         assert_eq!(literal_pattern("a.b*(c)"), "(?i)a\\.b\\*\\(c\\)");
         assert_eq!(literal_pattern("C:\\x"), "C:\\\\x");
-        for query in ["a.b", "[x]", "$HOME", "a|b", "{1}", "^~#&-", "Á"] {
+        // Every metacharacter compiles and matches only itself.
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::term::{Config, Term};
+        use alacritty_terminal::vte::ansi::Processor;
+        let size = crate::session::GridSize { cols: 40, rows: 2 };
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(
+            &mut term,
+            "axb a|c ñandú\r\na.b [x] $HOME {1} ^~#&- (y)".as_bytes(),
+        );
+        let found = |query: &str| {
             let mut regex = RegexSearch::new(&literal_pattern(query)).unwrap();
-            let _ = &mut regex;
+            next_match(&term, &mut regex, None, true)
+                .map(|m| term.bounds_to_string(*m.start(), *m.end()))
+        };
+        for query in [
+            "a.b", "[x]", "$HOME", "{1}", "^~#&-", "(y)", "a|c", "ñandú", "home",
+        ] {
+            assert!(found(query).is_some(), "{query}");
         }
+        assert_eq!(found("a.b").as_deref(), Some("a.b"));
+        assert_eq!(found("x|y"), None);
+        assert_eq!(found("Ñandú"), None);
+        assert_eq!(found("home").as_deref(), Some("HOME"));
     }
 
     #[test]
@@ -731,6 +819,40 @@ mod tests {
         let mut upper = RegexSearch::new(&literal_pattern("ERR")).unwrap();
         let only = next_match(&term, &mut upper, None, true).unwrap();
         assert_eq!(next_match(&term, &mut upper, Some(&only), true), Some(only));
+    }
+
+    #[test]
+    fn matches_follow_new_output() {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::term::{Config, Term};
+        use alacritty_terminal::vte::ansi::Processor;
+
+        let size = crate::session::GridSize { cols: 20, rows: 3 };
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"a\r\nb err\r\nc");
+        let mut regex = RegexSearch::new(&literal_pattern("err")).unwrap();
+        let m = next_match(&term, &mut regex, None, true).unwrap();
+        let text = term.bounds_to_string(*m.start(), *m.end());
+        let history = term.history_size();
+        assert_eq!(relocate(&term, &m, &text, history), Some(m.clone()));
+
+        // Two more lines push it up by two.
+        parser.advance(&mut term, b"\r\nd\r\ne");
+        let moved = relocate(&term, &m, &text, history).unwrap();
+        assert_eq!(moved.start().line.0, m.start().line.0 - 2);
+        // Another text there (wrong history size): dropped, no panic.
+        assert_eq!(relocate(&term, &m, &text, history + 2), None);
+    }
+
+    #[test]
+    fn wheel_is_bounded() {
+        assert_eq!(wheel_lines(0.0, 36.0), (2, 0.0));
+        let (lines, rest) = wheel_lines(0.5, 9.0);
+        assert_eq!((lines, rest), (1, 0.0));
+        assert_eq!(wheel_lines(0.0, -18.0).0, -1);
+        assert_eq!(wheel_lines(0.0, 4.0e12).0, MAX_WHEEL_LINES as i32);
+        assert_eq!(wheel_lines(0.0, -4.0e12), (-(MAX_WHEEL_LINES as i32), 0.0));
     }
 
     #[test]

@@ -32,6 +32,8 @@ impl WorkspaceView {
         if self.editor.is_some() {
             return;
         }
+        // One keyboard overlay at a time.
+        self.close_search_quietly(cx);
         let entries = self.palette_entries();
         let shown = commands::filter(&entries, "");
         self.palette = Some(Palette {

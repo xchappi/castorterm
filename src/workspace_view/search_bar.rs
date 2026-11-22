@@ -17,7 +17,13 @@ pub(super) struct SearchBar {
     pub session: SessionId,
     pub input: NameInput,
     pub result: Option<FindResult>,
+    /// Search after the user pauses typing (dropping it cancels it).
+    pending: Option<gpui::Task<()>>,
 }
+
+/// Pause after typing before searching: every search sweeps the history
+/// with the terminal locked.
+const TYPING_DELAY: std::time::Duration = std::time::Duration::from_millis(120);
 
 impl WorkspaceView {
     pub(super) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -27,15 +33,13 @@ impl WorkspaceView {
         let Some(session) = self.tabs.active_id() else {
             return;
         };
-        // Reopening keeps the query: Enter goes on from the match shown.
-        if self.search.as_ref().is_none_or(|s| s.session != session) {
-            self.close_search_quietly(cx);
-            self.search = Some(SearchBar {
-                session,
-                input: NameInput::default(),
-                result: None,
-            });
-        }
+        self.close_search_quietly(cx);
+        self.search = Some(SearchBar {
+            session,
+            input: NameInput::with_limit(MAX_QUERY_CHARS),
+            result: None,
+            pending: None,
+        });
         // Like the palette: the view takes the keyboard, terminals ignore it.
         self.sync_input_gate();
         window.focus(&self.focus);
@@ -85,24 +89,38 @@ impl WorkspaceView {
             .handle(&keystroke.key, keystroke.key_char.as_deref(), mods)
         {
             InputAction::Cancel => self.close_search(window, cx),
-            InputAction::Changed => self.run_search(true, cx),
+            InputAction::Changed => self.search_soon(cx),
             InputAction::Paste => {
                 if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                    // One line: a pasted block searches its first line.
-                    let line = text.lines().next().unwrap_or_default().to_string();
-                    bar.input.insert(&line);
-                    self.run_search(true, cx);
+                    // One line: a pasted block searches its first non-blank line.
+                    let line = text.lines().map(str::trim).find(|l| !l.is_empty());
+                    if bar.input.insert(line.unwrap_or_default()) {
+                        self.run_search(true, cx);
+                    }
                 }
             }
             InputAction::Commit | InputAction::Ignored => {}
         }
     }
 
+    /// Searches once the user stops typing; shows the new text right away.
+    fn search_soon(&mut self, cx: &mut Context<Self>) {
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TYPING_DELAY).await;
+            let _ = this.update(cx, |this, cx| this.run_search(true, cx));
+        });
+        if let Some(bar) = self.search.as_mut() {
+            bar.pending = Some(task);
+        }
+        cx.notify();
+    }
+
     /// Searches the bar's query in its session (see `TerminalView::find`).
     fn run_search(&mut self, backwards: bool, cx: &mut Context<Self>) {
-        let Some(bar) = self.search.as_ref() else {
+        let Some(bar) = self.search.as_mut() else {
             return;
         };
+        bar.pending = None;
         let (session, query) = (bar.session, bar.input.text.clone());
         let Some(tab) = self.tabs.iter().find(|t| t.id == session) else {
             return;
@@ -117,8 +135,9 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    pub(super) fn render_search_bar(&self) -> Option<AnyElement> {
-        let bar = self.search.as_ref()?;
+    /// The bar, drawn inside the pane of session `pane`, if it searches it.
+    pub(super) fn render_search_bar(&self, pane: SessionId) -> Option<AnyElement> {
+        let bar = self.search.as_ref().filter(|b| b.session == pane)?;
         let empty = bar.input.text.is_empty();
         let (status, color) = match bar.result {
             Some(FindResult::Found) => ("Enter older · Shift+Enter newer · Esc", MUTED),
@@ -127,13 +146,14 @@ impl WorkspaceView {
                 ("Query too long", ERROR)
             }
             Some(FindResult::Invalid) => ("Cannot search that", ERROR),
+            Some(FindResult::FullScreen) => ("No history in full-screen programs", ERROR),
             None => ("Search the history · Esc to close", MUTED),
         };
         Some(
             div()
                 .absolute()
-                .top(px(14.0))
-                .right(px(22.0))
+                .top(px(10.0))
+                .right(px(16.0))
                 .w(px(360.0))
                 .flex()
                 .flex_col()
