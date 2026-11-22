@@ -1,7 +1,7 @@
 ## 1. Implementation
 
 - [x] 1.1 `touched`: hook parsing, guarded append, tolerant tail read
-- [x] 1.2 `castorterm --touched`
+- [x] 1.2 `castorterm --status touched`
 - [x] 1.3 Polling with the status; cleanup with the status file
 - [x] 1.4 Button and list in the terminal view, preview and open
 

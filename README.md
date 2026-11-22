@@ -63,12 +63,12 @@ Claude Code, add to the `PostToolUse` hooks of `~/.claude/settings.json`:
 
 ```json
 { "matcher": "Read|Edit|Write|MultiEdit|NotebookEdit",
-  "hooks": [{ "type": "command", "command": "\"C:/path/to/castorterm.exe\" --touched" }] }
+  "hooks": [{ "type": "command", "command": "\"C:/path/to/castorterm.exe\" --status touched" }] }
 ```
 
-`castorterm --touched` reads the hook's JSON from stdin and does nothing
-outside castorterm. Install a castorterm that knows `--touched` before adding
-the hook: older versions would open a window for it.
+`castorterm --status touched` reads the hook's JSON from stdin and does
+nothing outside castorterm (an older castorterm just rejects the value).
+The preview shows any local file the agent used, as the agent could read it.
 
 Paths and URLs in the output are links. Rest the mouse on a file path
 (`src/view.rs:120`, `out/screenshot.png`) to preview it over the terminal: an

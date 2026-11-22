@@ -6,13 +6,13 @@ work without searching its output.
 ## ADDED Requirements
 
 ### Requirement: Record files used by the agent
-`castorterm --touched` SHALL read a Claude Code hook's JSON from stdin and, for the Read, Edit,
+`castorterm --status touched` SHALL read a Claude Code hook's JSON from stdin and, for the Read, Edit,
 MultiEdit, NotebookEdit and Write tools with an absolute path, append the action and path to the
 session's files list. It SHALL do nothing outside castorterm and SHALL refuse a status variable that
 does not name a castorterm status file.
 
 #### Scenario: Claude edits a file
-- **WHEN** Claude Code's PostToolUse hook runs `castorterm --touched` after editing `C:/p/src/a.rs`
+- **WHEN** Claude Code's PostToolUse hook runs `castorterm --status touched` after editing `C:/p/src/a.rs`
 - **THEN** the session's list contains `src/a.rs` marked as edited
 
 ### Requirement: Show the files of a session

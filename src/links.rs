@@ -226,7 +226,7 @@ pub fn is_local(path: &Path) -> bool {
     true
 }
 
-fn is_link(meta: &std::fs::Metadata) -> bool {
+pub(crate) fn is_link(meta: &std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt as _;

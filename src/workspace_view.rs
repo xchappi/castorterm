@@ -159,6 +159,8 @@ pub struct WorkspaceView {
     statuses: HashMap<SessionId, AgentStatus>,
     /// Working directory each shell last reported (OSC 7 / OSC 9;9).
     cwds: HashMap<SessionId, PathBuf>,
+    /// Stamp of each session's files list when last read.
+    touched_stamps: HashMap<SessionId, crate::touched::Stamp>,
     /// Session whose tab or row got the last click: a double click only
     /// renames when both clicks hit the same session.
     last_click: Option<SessionId>,
@@ -262,6 +264,7 @@ impl WorkspaceView {
             next_status_key: 0,
             statuses: HashMap::new(),
             cwds: HashMap::new(),
+            touched_stamps: HashMap::new(),
             last_click: None,
             split: None,
             statuses_loading: false,
@@ -444,6 +447,7 @@ impl WorkspaceView {
         }
         self.statuses.remove(&id);
         self.cwds.remove(&id);
+        self.touched_stamps.remove(&id);
         self.last_click = None;
         if self.renaming_session(id) {
             self.editor = None;
@@ -526,10 +530,13 @@ impl WorkspaceView {
         if self.statuses_loading {
             return;
         }
-        let files: Vec<(SessionId, PathBuf)> = self
+        let files: Vec<(SessionId, PathBuf, Option<crate::touched::Stamp>)> = self
             .tabs
             .iter()
-            .filter_map(|t| t.handle.status_file.clone().map(|f| (t.id, f)))
+            .filter_map(|t| {
+                let stamp = self.touched_stamps.get(&t.id).copied();
+                t.handle.status_file.clone().map(|f| (t.id, f, stamp))
+            })
             .collect();
         if files.is_empty() {
             return;
@@ -540,8 +547,9 @@ impl WorkspaceView {
                 .background_spawn(async move {
                     files
                         .into_iter()
-                        .map(|(id, f)| {
-                            let touched = crate::touched::read(&crate::touched::files_for(&f));
+                        .map(|(id, f, stamp)| {
+                            let touched =
+                                crate::touched::read_changed(&crate::touched::files_for(&f), stamp);
                             (id, agent_status::read(&f), touched)
                         })
                         .collect::<Vec<_>>()
@@ -556,9 +564,15 @@ impl WorkspaceView {
                     let Some(tab) = this.tabs.iter().find(|t| t.id == id) else {
                         continue;
                     };
-                    tab.handle
-                        .view
-                        .update(cx, |view, cx| view.set_touched(touched, cx));
+                    if let Some((stamp, list)) = touched {
+                        match stamp {
+                            Some(stamp) => this.touched_stamps.insert(id, stamp),
+                            None => this.touched_stamps.remove(&id),
+                        };
+                        tab.handle
+                            .view
+                            .update(cx, |view, cx| view.set_touched(list, cx));
+                    }
                     if let Some(status) = read.or_else(|| this.statuses.get(&id).copied()) {
                         statuses.insert(id, status);
                     }

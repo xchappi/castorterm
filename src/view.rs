@@ -994,6 +994,11 @@ impl TerminalView {
             return;
         }
         self.hover_cell = Some((col, row, ctrl));
+        // Over the terminal, not over the files list (which occludes it).
+        if self.row_hover.is_some() {
+            self.clear_row_preview();
+            cx.notify();
+        }
         let link = crate::links::link_at(&self.row_text(row), col);
         let key = link.as_ref().map(|l| (row, l.start, l.end));
         let same = self.hover.as_ref().map(|h| (h.0, h.1, h.2)) == key;
@@ -1179,6 +1184,8 @@ impl TerminalView {
                 .bottom(px(8.0))
                 .right(px(8.0))
                 .max_w(px(PREVIEW_WIDTH + 24.0))
+                // Room for the files list on the left in narrow panes.
+                .max_w(gpui::relative(0.5))
                 .flex()
                 .flex_col()
                 .gap_1()
@@ -1212,8 +1219,26 @@ impl TerminalView {
     /// Files the agent used, from its hooks (polled by the window).
     pub fn set_touched(&mut self, touched: Vec<crate::touched::Touched>, cx: &mut Context<Self>) {
         if self.touched != touched {
+            // A previewed file that left the list takes its preview along.
+            if let Some(row) = &self.row_hover
+                && !touched.iter().any(|t| &t.path == row)
+            {
+                self.clear_row_preview();
+            }
             self.touched = touched;
             cx.notify();
+        }
+    }
+
+    /// Drops the preview of a list row (a pasted image stays).
+    fn clear_row_preview(&mut self) {
+        self.row_hover = None;
+        if !matches!(
+            self.preview.as_ref().map(|p| &p.content),
+            Some(PreviewContent::Pasted(_))
+        ) {
+            self.preview = None;
+            self.preview_task = None;
         }
     }
 
@@ -1231,7 +1256,12 @@ impl TerminalView {
                 })
                 .await;
             let _ = this.update(cx, |view, cx| {
+                let pasted = matches!(
+                    view.preview.as_ref().map(|p| &p.content),
+                    Some(PreviewContent::Pasted(_))
+                );
                 if view.row_hover.as_ref() == Some(&path)
+                    && !pasted
                     && let Some(preview) = loaded
                 {
                     view.preview = Some(preview);
@@ -1262,7 +1292,7 @@ impl TerminalView {
             return None;
         }
         let rows = self.show_touched.then(|| {
-            self.touched.iter().enumerate().map(|(i, t)| {
+            self.touched.iter().map(|t| {
                 let (badge, color) = match t.action {
                     Action::Read => ("R", MUTED),
                     Action::Edit => ("E", 0xffb547),
@@ -1271,7 +1301,7 @@ impl TerminalView {
                 let path = t.path.clone();
                 let open = t.path.to_string_lossy().into_owned();
                 div()
-                    .id(("touched", i))
+                    .id(SharedString::from(format!("touched:{}", t.path.display())))
                     .flex()
                     .items_center()
                     .gap_2()
@@ -1300,9 +1330,7 @@ impl TerminalView {
                         if *hovered {
                             view.preview_row(path.clone(), cx);
                         } else if view.row_hover.as_ref() == Some(&path) {
-                            view.row_hover = None;
-                            view.preview = None;
-                            view.preview_task = None;
+                            view.clear_row_preview();
                             cx.notify();
                         }
                     }))
@@ -1334,6 +1362,7 @@ impl TerminalView {
                         div()
                             .id("touched-list")
                             .w(px(360.0))
+                            .max_w(gpui::relative(0.45))
                             .max_h(px(260.0))
                             .overflow_y_scroll()
                             .flex()
@@ -1367,7 +1396,7 @@ impl TerminalView {
                         .on_click(cx.listener(|view, _: &gpui::ClickEvent, _, cx| {
                             view.show_touched = !view.show_touched;
                             if !view.show_touched {
-                                view.row_hover = None;
+                                view.clear_row_preview();
                             }
                             cx.notify();
                         })),

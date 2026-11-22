@@ -9,6 +9,10 @@
 - **In the pane.** The button and list belong to the session's terminal view (bottom left), like the
   preview (bottom right), so split view shows each session's own files. Opening reuses the link
   rules: local paths only, nothing executed.
-- **Deployment order.** An older castorterm treats `--touched` as a normal start and would open a
-  window per tool use, so the hook must only be added once a castorterm with `--touched` is
-  installed.
+- **Safe in any deployment order.** The hook runs `castorterm --status touched`: an older castorterm
+  rejects the unknown status and exits without opening a window, so the hook can be installed before
+  castorterm is updated.
+- **Hardened after review.** The list is never written through a link (symlink, junction); it starts
+  over by writing a temporary file and renaming it, so concurrent appends never land mid-line; it is
+  only re-read when its size or time changed; list rows are keyed by path, and closing the list or a
+  file leaving it drops its preview; the list and the preview share narrow panes.

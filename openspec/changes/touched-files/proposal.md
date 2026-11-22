@@ -5,7 +5,7 @@ output; reviewing its work means hunting for paths.
 
 ## What Changes
 
-- `castorterm --touched`: run by Claude Code's `PostToolUse` hook (Read, Edit, Write, MultiEdit,
+- `castorterm --status touched`: run by Claude Code's `PostToolUse` hook (Read, Edit, Write, MultiEdit,
   NotebookEdit), reads the hook's JSON from stdin and appends `{"action","path"}` to
   `<pid>-<n>.files` next to the session's status file. OpenCode's plugin (castorlabs-stack) writes
   the same lines itself.
@@ -23,6 +23,6 @@ output; reviewing its work means hunting for paths.
 
 ## Impact
 
-New `src/touched.rs`; `src/main.rs` (`--touched`), `src/agent_status.rs` (shared guard, stale
+New `src/touched.rs`; `src/main.rs` (`--status touched`), `src/agent_status.rs` (shared guard, stale
 cleanup), `src/view.rs` (button, list), `src/workspace_view.rs` (polling, cleanup); README. The
 hooks themselves are installed by castorlabs-stack's adapters.
