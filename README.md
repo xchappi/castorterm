@@ -56,6 +56,10 @@ Build your workspaces from the window, no config editing needed:
 
 Every change is saved to your config file, keeping your comments.
 
+Double-click a tab or a session row (or use **Rename session** in the
+palette) to name it; the name is kept when castorterm reopens your sessions.
+Drag a tab onto another to reorder.
+
 Tabs and session rows show where each shell is when it leaves the project
 folder. castorterm reads it from the shell: OSC 7 (bash, zsh, fish,
 oh-my-posh) and, on Windows, a small PowerShell integration it adds after
@@ -120,6 +124,7 @@ other agent can do the same from its own hooks or scripts.
 | `Ctrl+Shift+T` | New shell in the current project |
 | `Ctrl+Shift+W` | Close the current session |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous session |
+| `Ctrl+Shift+PageUp` / `PageDown` | Move the session left / right |
 | `Ctrl+Shift+E` | Show / hide the file explorer |
 | `Ctrl+Shift+O` | Add folders to the selected workspace |
 | `Ctrl+Shift+P` | Command palette: open any agent in any project, go to a session, add folders |

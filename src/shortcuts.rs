@@ -18,13 +18,22 @@ pub enum Shortcut {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    /// Move the active session one place left / right.
+    MoveSessionLeft,
+    MoveSessionRight,
 }
 
 impl Shortcut {
     /// Whether a held key may repeat the shortcut. Opening or closing
     /// sessions must not repeat: holding Ctrl+Shift+W would close them all.
     pub fn repeats(self) -> bool {
-        matches!(self, Shortcut::NextSession | Shortcut::PrevSession)
+        matches!(
+            self,
+            Shortcut::NextSession
+                | Shortcut::PrevSession
+                | Shortcut::MoveSessionLeft
+                | Shortcut::MoveSessionRight
+        )
     }
 }
 
@@ -51,6 +60,8 @@ pub fn match_shortcut(key: &str, mods: Mods) -> Option<Shortcut> {
         ("j", true) => Some(Shortcut::NextWaiting),
         ("tab", false) => Some(Shortcut::NextSession),
         ("tab", true) => Some(Shortcut::PrevSession),
+        ("pageup", true) => Some(Shortcut::MoveSessionLeft),
+        ("pagedown", true) => Some(Shortcut::MoveSessionRight),
         _ => None,
     }
 }
@@ -98,6 +109,15 @@ mod tests {
         );
         assert_eq!(match_shortcut("tab", CTRL), Some(Shortcut::NextSession));
         assert_eq!(
+            match_shortcut("pageup", CTRL_SHIFT),
+            Some(Shortcut::MoveSessionLeft)
+        );
+        assert_eq!(
+            match_shortcut("pagedown", CTRL_SHIFT),
+            Some(Shortcut::MoveSessionRight)
+        );
+        assert_eq!(match_shortcut("pageup", CTRL), None);
+        assert_eq!(
             match_shortcut("tab", CTRL_SHIFT),
             Some(Shortcut::PrevSession)
         );
@@ -110,6 +130,8 @@ mod tests {
         assert!(!Shortcut::ToggleFiles.repeats());
         assert!(Shortcut::NextSession.repeats());
         assert!(Shortcut::PrevSession.repeats());
+        assert!(Shortcut::MoveSessionLeft.repeats());
+        assert!(Shortcut::MoveSessionRight.repeats());
     }
 
     #[test]
