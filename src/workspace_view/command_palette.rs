@@ -125,6 +125,11 @@ impl WorkspaceView {
                 detail: "Ctrl+Shift+D".into(),
                 action: Action::ToggleSplit,
             });
+            entries.push(Entry {
+                title: "Find in history".into(),
+                detail: "Ctrl+Shift+F".into(),
+                action: Action::Find,
+            });
         }
         entries.push(Entry {
             title: "Show files".into(),
@@ -239,6 +244,7 @@ impl WorkspaceView {
                 self.open_editor(EditTarget::RenameSession(id), window, cx);
             }
             Action::ToggleSplit => self.toggle_split(window, cx),
+            Action::Find => self.open_search(window, cx),
             Action::ShowFiles => {
                 self.show_files = true;
                 self.show_tab(MiddleTab::Files, cx);
