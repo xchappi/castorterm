@@ -26,6 +26,7 @@ mod shortcuts;
 mod split;
 mod tabs;
 mod theme;
+mod touched;
 mod tree;
 mod view;
 mod workspace_view;
@@ -61,6 +62,18 @@ fn main() {
             eprintln!("castorterm: {err}");
         }
         // Never fail the agent's hook, never open a window from it.
+        return;
+    }
+
+    // `castorterm --touched`, run by Claude Code's PostToolUse hook: note
+    // the file the agent read or edited, from the hook's JSON on stdin.
+    if args.first().is_some_and(|a| a == "--touched") {
+        if let Err(err) = touched::record_from_hook(
+            std::io::stdin().lock(),
+            std::env::var_os(agent_status::ENV_VAR).as_deref(),
+        ) {
+            eprintln!("castorterm: {err}");
+        }
         return;
     }
 
